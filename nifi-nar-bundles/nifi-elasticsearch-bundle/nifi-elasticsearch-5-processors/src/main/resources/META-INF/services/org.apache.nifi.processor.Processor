@@ -15,3 +15,4 @@
 org.apache.nifi.processors.elasticsearch.FetchElasticsearch5
 org.apache.nifi.processors.elasticsearch.PutElasticsearch5
 org.apache.nifi.processors.elasticsearch.DeleteElasticsearch5
+org.apache.nifi.processors.elasticsearch.JsonQueryElasticsearch5

@@ -52,6 +52,11 @@ language governing permissions and limitations under the License. -->
             <version>${es.version}</version>
         </dependency>
         <dependency>
+            <groupId>org.elasticsearch.client</groupId>
+            <artifactId>rest</artifactId>
+            <version>${es.version}</version>
+        </dependency>
+        <dependency>
             <groupId>org.apache.nifi</groupId>
             <artifactId>nifi-ssl-context-service-api</artifactId>
         </dependency>
