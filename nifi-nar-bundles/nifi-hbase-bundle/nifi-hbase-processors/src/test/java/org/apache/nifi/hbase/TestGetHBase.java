@@ -76,6 +76,7 @@ public class TestGetHBase {
         runner.setProperty(GetHBase.TABLE_NAME, "nifi");
         runner.setProperty(GetHBase.DISTRIBUTED_CACHE_SERVICE, "cacheClient");
         runner.setProperty(GetHBase.HBASE_CLIENT_SERVICE, "hbaseClient");
+        runner.setProperty(GetHBase.VISIBILITY_LABELS, "");
     }
 
     @After

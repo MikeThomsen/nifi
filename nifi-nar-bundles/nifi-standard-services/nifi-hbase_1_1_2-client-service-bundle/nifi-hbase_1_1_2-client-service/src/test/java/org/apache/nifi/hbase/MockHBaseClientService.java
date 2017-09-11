@@ -142,15 +142,14 @@ public class MockHBaseClientService extends HBase_1_1_2_ClientService {
         return true;
     }
 
-    @Override
-    protected ResultScanner getResults(Table table, byte[] startRow, byte[] endRow, Collection<Column> columns) throws IOException {
+    protected ResultScanner getResults(Table table, byte[] startRow, byte[] endRow, Collection<Column> columns, List<String> labels) throws IOException {
         final ResultScanner scanner = Mockito.mock(ResultScanner.class);
         Mockito.when(scanner.iterator()).thenReturn(results.iterator());
         return scanner;
     }
 
     @Override
-    protected ResultScanner getResults(Table table, Collection<Column> columns, Filter filter, long minTime) throws IOException {
+    protected ResultScanner getResults(Table table, Collection<Column> columns, Filter filter, long minTime, List<String> labels) throws IOException {
         final ResultScanner scanner = Mockito.mock(ResultScanner.class);
         Mockito.when(scanner.iterator()).thenReturn(results.iterator());
         return scanner;

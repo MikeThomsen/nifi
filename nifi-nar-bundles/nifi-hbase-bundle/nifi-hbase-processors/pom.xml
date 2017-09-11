@@ -95,5 +95,9 @@
             <artifactId>nifi-mock-record-utils</artifactId>
             <scope>test</scope>
         </dependency>
+        <dependency>
+            <groupId>org.apache.nifi</groupId>
+            <artifactId>nifi-record-path</artifactId>
+        </dependency>
     </dependencies>
 </project>

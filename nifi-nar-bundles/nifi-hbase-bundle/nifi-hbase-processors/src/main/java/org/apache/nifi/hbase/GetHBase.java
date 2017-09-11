@@ -55,6 +55,7 @@ import org.apache.nifi.components.AllowableValue;
 import org.apache.nifi.components.PropertyDescriptor;
 import org.apache.nifi.components.ValidationContext;
 import org.apache.nifi.components.ValidationResult;
+import org.apache.nifi.components.Validator;
 import org.apache.nifi.components.state.Scope;
 import org.apache.nifi.components.state.StateManager;
 import org.apache.nifi.components.state.StateMap;
@@ -149,6 +150,15 @@ public class GetHBase extends AbstractProcessor {
             .defaultValue(NONE.getValue())
             .build();
 
+    static final PropertyDescriptor VISIBILITY_LABELS = new PropertyDescriptor.Builder()
+            .name("hbase-fetch-row-vis-labels")
+            .displayName("Visibility Labels")
+            .description("The list of visibility labels to supply for the GET when visibility labels are in use in HBase.")
+            .required(false)
+            .expressionLanguageSupported(false)
+            .addValidator(Validator.VALID)
+            .build();
+
     static final Relationship REL_SUCCESS = new Relationship.Builder()
             .name("success")
             .description("All FlowFiles are routed to this relationship")
@@ -171,6 +181,7 @@ public class GetHBase extends AbstractProcessor {
         properties.add(DISTRIBUTED_CACHE_SERVICE);
         properties.add(TABLE_NAME);
         properties.add(COLUMNS);
+        properties.add(VISIBILITY_LABELS);
         properties.add(FILTER_EXPRESSION);
         properties.add(INITIAL_TIMERANGE);
         properties.add(CHARSET);
@@ -252,6 +263,16 @@ public class GetHBase extends AbstractProcessor {
         final String tableName = context.getProperty(TABLE_NAME).getValue();
         final String initialTimeRange = context.getProperty(INITIAL_TIMERANGE).getValue();
         final String filterExpression = context.getProperty(FILTER_EXPRESSION).getValue();
+        final String visibilityLabels = context.getProperty(VISIBILITY_LABELS).getValue();
+
+        List<String> visLabels = new ArrayList<>();
+        if (visibilityLabels != null && visibilityLabels.length() > 0) {
+            String[] parts = visibilityLabels.split(",");
+            for (String part : parts) {
+                visLabels.add(part.trim());
+            }
+        }
+
         final HBaseClientService hBaseClientService = context.getProperty(HBASE_CLIENT_SERVICE).asControllerService(HBaseClientService.class);
 
         // if the table was changed then remove any previous state
@@ -278,7 +299,7 @@ public class GetHBase extends AbstractProcessor {
             final AtomicReference<Long> latestTimestampHolder = new AtomicReference<>(minTime);
 
 
-            hBaseClientService.scan(tableName, columns, filterExpression, minTime, new ResultHandler() {
+            hBaseClientService.scan(tableName, columns, filterExpression, minTime, visLabels, new ResultHandler() {
                 @Override
                 public void handle(final byte[] rowKey, final ResultCell[] resultCells) {
 

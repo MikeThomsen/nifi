@@ -28,6 +28,7 @@ import org.apache.commons.lang3.StringUtils;
 import org.apache.nifi.annotation.lifecycle.OnScheduled;
 import org.apache.nifi.components.AllowableValue;
 import org.apache.nifi.components.PropertyDescriptor;
+import org.apache.nifi.components.Validator;
 import org.apache.nifi.flowfile.FlowFile;
 import org.apache.nifi.hbase.put.PutFlowFile;
 import org.apache.nifi.processor.AbstractProcessor;
@@ -61,6 +62,15 @@ public abstract class AbstractPutHBase extends AbstractProcessor {
             .required(false) // not all sub-classes will require this
             .expressionLanguageSupported(true)
             .addValidator(StandardValidators.NON_EMPTY_VALIDATOR)
+            .build();
+
+    protected static final PropertyDescriptor DEFAULT_VISIBILITY_STRING = new PropertyDescriptor.Builder()
+            .name("hbase-default-vis-string")
+            .displayName("Default Visibility String")
+            .description("When using visibility labels, if a value is set in this property all cells without their own visibility string will have this applied to them.")
+            .required(false)
+            .expressionLanguageSupported(true)
+            .addValidator(Validator.VALID)
             .build();
 
     static final String STRING_ENCODING_VALUE = "String";
@@ -128,6 +138,13 @@ public abstract class AbstractPutHBase extends AbstractProcessor {
     @OnScheduled
     public void onScheduled(final ProcessContext context) {
         clientService = context.getProperty(HBASE_CLIENT_SERVICE).asControllerService(HBaseClientService.class);
+    }
+
+    protected String pickVisibilityString(String defaultVisibilityString, String columnFamily, String columnQualifier, FlowFile flowFile) {
+        final String visibilityAttribute = String.format("visibility.%s.%s", columnFamily, columnQualifier);
+        final String visibilityAttrValue = flowFile.getAttribute(visibilityAttribute);
+
+        return visibilityAttrValue != null ? visibilityAttrValue : defaultVisibilityString;
     }
 
     @Override

@@ -117,6 +117,7 @@ public class PutHBaseJSON extends AbstractPutHBase {
         properties.add(ROW_FIELD_NAME);
         properties.add(ROW_ID_ENCODING_STRATEGY);
         properties.add(COLUMN_FAMILY);
+        properties.add(DEFAULT_VISIBILITY_STRING);
         properties.add(TIMESTAMP);
         properties.add(BATCH_SIZE);
         properties.add(COMPLEX_FIELD_STRATEGY);
@@ -167,6 +168,8 @@ public class PutHBaseJSON extends AbstractPutHBase {
         final String complexFieldStrategy = context.getProperty(COMPLEX_FIELD_STRATEGY).getValue();
         final String fieldEncodingStrategy = context.getProperty(FIELD_ENCODING_STRATEGY).getValue();
         final String rowIdEncodingStrategy = context.getProperty(ROW_ID_ENCODING_STRATEGY).getValue();
+
+        final String visibilityString = context.getProperty(DEFAULT_VISIBILITY_STRING).evaluateAttributeExpressions(flowFile).getValue().trim();
 
         final Long timestamp;
         if (!StringUtils.isBlank(timestampValue)) {
@@ -255,7 +258,16 @@ public class PutHBaseJSON extends AbstractPutHBase {
                     final byte[] colFamBytes = columnFamily.getBytes(StandardCharsets.UTF_8);
                     final byte[] colQualBytes = fieldName.getBytes(StandardCharsets.UTF_8);
                     final byte[] colValBytes = fieldValueHolder.get();
-                    columns.add(new PutColumn(colFamBytes, colQualBytes, colValBytes, timestamp));
+
+                    final String visibilityStringToUse = pickVisibilityString(visibilityString, columnFamily, fieldName, flowFile);
+                    PutColumn column;
+                    if (visibilityStringToUse != null && !visibilityStringToUse.equals("")) {
+                        column = new PutColumn(colFamBytes, colQualBytes, colValBytes, timestamp, visibilityStringToUse);
+                    } else {
+                        column = new PutColumn(colFamBytes, colQualBytes, colValBytes, timestamp);
+                    }
+
+                    columns.add(column);
                 }
             }
         }

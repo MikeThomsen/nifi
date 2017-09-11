@@ -72,7 +72,7 @@ public class MockHBaseClientService extends AbstractControllerService implements
     }
 
     @Override
-    public void scan(String tableName, byte[] startRow, byte[] endRow, Collection<Column> columns, ResultHandler handler) throws IOException {
+    public void scan(String tableName, byte[] startRow, byte[] endRow, Collection<Column> columns, List<String> labels, ResultHandler handler) throws IOException {
         if (throwException) {
             throw new IOException("exception");
         }
@@ -106,6 +106,26 @@ public class MockHBaseClientService extends AbstractControllerService implements
     }
 
     @Override
+    public void scan(String tableName, byte[] startRow, byte[] endRow, Collection<Column> columns, ResultHandler handler) throws IOException {
+        scan(tableName, startRow, endRow, columns, null, handler);
+    }
+
+    @Override
+    public List<String> getLabels() {
+        return null;
+    }
+
+    @Override
+    public List<String> getLabelsForUser(String user) {
+        return null;
+    }
+
+    @Override
+    public List<String> getLabelsForCurrentUser() {
+        return null;
+    }
+
+    @Override
     public void scan(String tableName, Collection<Column> columns, String filterExpression, long minTime, ResultHandler handler) throws IOException {
         if (throwException) {
             throw new IOException("exception");
@@ -117,6 +137,11 @@ public class MockHBaseClientService extends AbstractControllerService implements
         }
 
         numScans++;
+    }
+
+    @Override
+    public void scan(String tableName, Collection<Column> columns, String filterExpression, long minTime, List<String> visibilityLabels, ResultHandler handler) throws IOException {
+        scan(tableName,columns, filterExpression, minTime, handler);
     }
 
     public void addResult(final String rowKey, final Map<String, String> cells, final long timestamp) {

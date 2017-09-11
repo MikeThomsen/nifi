@@ -29,6 +29,7 @@ import org.apache.nifi.processor.util.StandardValidators;
 
 import java.io.IOException;
 import java.util.Collection;
+import java.util.List;
 
 @Tags({"hbase", "client"})
 @CapabilityDescription("A controller service for accessing an HBase client.")
@@ -129,6 +130,19 @@ public interface HBaseClientService extends ControllerService {
     void scan(String tableName, Collection<Column> columns, String filterExpression, long minTime, ResultHandler handler) throws IOException;
 
     /**
+     * Scans the given table using the optional filter criteria and passing each result to the provided handler.
+     *
+     * @param tableName the name of an HBase table to scan
+     * @param columns optional columns to return, if not specified all columns are returned
+     * @param filterExpression optional filter expression, if not specified no filtering is performed
+     * @param minTime the minimum timestamp of cells to return, passed to the HBase scanner timeRange
+     * @param visibilityLabels the visibility labels to apply to the scanner.
+     * @param handler a handler to process rows of the result set
+     * @throws IOException thrown when there are communication errors with HBase
+     */
+    void scan(String tableName, Collection<Column> columns, String filterExpression, long minTime, List<String> visibilityLabels, ResultHandler handler) throws IOException;
+
+    /**
      * Scans the given table for the given rowId and passes the result to the handler.
      *
      * @param tableName the name of an HBase table to scan
@@ -139,6 +153,40 @@ public interface HBaseClientService extends ControllerService {
      * @throws IOException thrown when there are communication errors with HBase
      */
     void scan(String tableName, byte[] startRow, byte[] endRow, Collection<Column> columns, ResultHandler handler) throws IOException;
+
+    /**
+     * Scans the given table for the given rowId and passes the result to the handler.
+     *
+     * @param tableName the name of an HBase table to scan
+     * @param startRow the row identifier to start scanning at
+     * @param endRow the row identifier to end scanning at
+     * @param columns optional columns to return, if not specified all columns are returned
+     * @param visibilityLabels optional list of visibility labels that the user should be able to see when communicating with HBase
+     * @param handler a handler to process rows of the result
+     * @throws IOException thrown when there are communication errors with HBase
+     */
+    void scan(String tableName, byte[] startRow, byte[] endRow, Collection<Column> columns, List<String> visibilityLabels, ResultHandler handler) throws IOException;
+
+    /**
+     * Get all of the labels in HBase.
+     *
+     * @return a List of all of the labels.
+     */
+    List<String> getLabels();
+
+    /**
+     * Get all of the labels a given user can see.
+     * @param user the user to lookup.
+     * @return a List of all of the labels a user is allowed to see.
+     */
+    List<String> getLabelsForUser(String user);
+
+    /**
+     * Get all of the labels the current user (NiFi process user or Kerberos keytab principle) can see.
+     *
+     * @return a List of all of the labels the current can see.
+     */
+    List<String> getLabelsForCurrentUser();
 
     /**
      * Converts the given boolean to it's byte representation.

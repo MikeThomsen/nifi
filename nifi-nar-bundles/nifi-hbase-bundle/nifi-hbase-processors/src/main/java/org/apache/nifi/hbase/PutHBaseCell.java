@@ -56,6 +56,7 @@ public class PutHBaseCell extends AbstractPutHBase {
         properties.add(TABLE_NAME);
         properties.add(ROW_ID);
         properties.add(ROW_ID_ENCODING_STRATEGY);
+        properties.add(DEFAULT_VISIBILITY_STRING);
         properties.add(COLUMN_FAMILY);
         properties.add(COLUMN_QUALIFIER);
         properties.add(TIMESTAMP);
@@ -78,6 +79,9 @@ public class PutHBaseCell extends AbstractPutHBase {
         final String columnFamily = context.getProperty(COLUMN_FAMILY).evaluateAttributeExpressions(flowFile).getValue();
         final String columnQualifier = context.getProperty(COLUMN_QUALIFIER).evaluateAttributeExpressions(flowFile).getValue();
         final String timestampValue = context.getProperty(TIMESTAMP).evaluateAttributeExpressions(flowFile).getValue();
+        final String visibilityString = context.getProperty(DEFAULT_VISIBILITY_STRING).evaluateAttributeExpressions(flowFile).getValue().trim();
+
+        final String visibilityStringToUse = pickVisibilityString(visibilityString, columnFamily, columnQualifier, flowFile);
 
         final Long timestamp;
         if (!StringUtils.isBlank(timestampValue)) {
@@ -100,9 +104,16 @@ public class PutHBaseCell extends AbstractPutHBase {
             }
         });
 
+        PutColumn column = null;
+        if (visibilityStringToUse != null && !visibilityStringToUse.equals("")) {
+            column = new PutColumn(columnFamily.getBytes(StandardCharsets.UTF_8),
+                    columnQualifier.getBytes(StandardCharsets.UTF_8), buffer, timestamp, visibilityString);
+        } else {
+            column = new PutColumn(columnFamily.getBytes(StandardCharsets.UTF_8),
+                    columnQualifier.getBytes(StandardCharsets.UTF_8), buffer, timestamp);
+        }
 
-        final Collection<PutColumn> columns = Collections.singletonList(new PutColumn(columnFamily.getBytes(StandardCharsets.UTF_8),
-                                                                            columnQualifier.getBytes(StandardCharsets.UTF_8), buffer, timestamp));
+        final Collection<PutColumn> columns = Collections.singletonList(column);
         byte[] rowKeyBytes = getRow(row,context.getProperty(ROW_ID_ENCODING_STRATEGY).getValue());
 
 

@@ -25,6 +25,7 @@ import org.apache.nifi.annotation.documentation.Tags;
 import org.apache.nifi.annotation.lifecycle.OnScheduled;
 import org.apache.nifi.components.AllowableValue;
 import org.apache.nifi.components.PropertyDescriptor;
+import org.apache.nifi.components.Validator;
 import org.apache.nifi.flowfile.FlowFile;
 import org.apache.nifi.flowfile.attributes.CoreAttributes;
 import org.apache.nifi.hbase.io.JsonFullRowSerializer;
@@ -43,6 +44,7 @@ import org.apache.nifi.processor.util.StandardValidators;
 import java.nio.charset.Charset;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -96,6 +98,15 @@ public class FetchHBaseRow extends AbstractProcessor {
             .required(false)
             .expressionLanguageSupported(true)
             .addValidator(StandardValidators.createRegexMatchingValidator(COLUMNS_PATTERN))
+            .build();
+
+    static final PropertyDescriptor VISIBILITY_LABELS = new PropertyDescriptor.Builder()
+            .name("hbase-fetch-row-vis-labels")
+            .displayName("Visibility Labels")
+            .description("The list of visibility labels to supply for the GET when visibility labels are in use in HBase.")
+            .required(false)
+            .expressionLanguageSupported(true)
+            .addValidator(Validator.VALID)
             .build();
 
     static final AllowableValue DESTINATION_ATTRIBUTES = new AllowableValue("flowfile-attributes", "flowfile-attributes",
@@ -178,6 +189,7 @@ public class FetchHBaseRow extends AbstractProcessor {
         props.add(TABLE_NAME);
         props.add(ROW_ID);
         props.add(COLUMNS);
+        props.add(VISIBILITY_LABELS);
         props.add(DESTINATION);
         props.add(JSON_FORMAT);
         props.add(JSON_VALUE_ENCODING);
@@ -250,6 +262,14 @@ public class FetchHBaseRow extends AbstractProcessor {
         final HBaseClientService hBaseClientService = context.getProperty(HBASE_CLIENT_SERVICE).asControllerService(HBaseClientService.class);
         final String destination = context.getProperty(DESTINATION).getValue();
         final boolean base64Encode = context.getProperty(JSON_VALUE_ENCODING).getValue().equals(ENCODING_BASE64.getValue());
+        final String visibilityLabels = context.getProperty(VISIBILITY_LABELS).evaluateAttributeExpressions(flowFile).getValue().trim();
+        List<String> visLabels = new ArrayList<>();
+        if (visibilityLabels != null && !visibilityLabels.equals("")) {
+            String[] parts = visibilityLabels.split(",");
+            for (String part : parts) {
+                visLabels.add(part.trim());
+            }
+        }
 
         final RowSerializer rowSerializer = base64Encode ? base64RowSerializer : regularRowSerializer;
 
@@ -259,7 +279,7 @@ public class FetchHBaseRow extends AbstractProcessor {
         final byte[] rowIdBytes = rowId.getBytes(StandardCharsets.UTF_8);
 
         try {
-            hBaseClientService.scan(tableName, rowIdBytes, rowIdBytes, columns, handler);
+            hBaseClientService.scan(tableName, rowIdBytes, rowIdBytes, columns, visLabels, handler);
         } catch (Exception e) {
             getLogger().error("Unable to fetch row {} from  {} due to {}", new Object[] {rowId, tableName, e});
             session.transfer(handler.getFlowFile(), REL_FAILURE);
