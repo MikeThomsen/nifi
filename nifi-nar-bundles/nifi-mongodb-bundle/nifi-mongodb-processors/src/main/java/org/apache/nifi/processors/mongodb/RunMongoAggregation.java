@@ -133,7 +133,7 @@ public class RunMongoAggregation extends AbstractMongoProcessor {
     }
 
     @Override
-    public void onTrigger(ProcessContext context, ProcessSession session) throws ProcessException {
+    public void onTrigger(ProcessContext context, ProcessSession session, final ProcessSession session2) throws ProcessException {
         FlowFile flowFile = null;
         if (context.hasIncomingConnection()) {
             flowFile = session.get();

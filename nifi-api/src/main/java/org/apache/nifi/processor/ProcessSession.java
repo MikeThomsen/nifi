@@ -869,4 +869,13 @@ public interface ProcessSession {
      * @return the provenance reporter
      */
     ProvenanceReporter getProvenanceReporter();
+
+    /**
+     * Make this session aware of another session that is available within the processor. It is mainly intended
+     * to be used to allow one session to look up content claims, repository records, etc. about a flowfile passed to
+     * the session being referenced.
+     *
+     * @param session
+     */
+    void addPeerSession(ProcessSession session);
 }

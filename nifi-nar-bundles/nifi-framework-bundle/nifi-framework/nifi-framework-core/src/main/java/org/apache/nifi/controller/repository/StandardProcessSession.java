@@ -158,6 +158,8 @@ public final class StandardProcessSession implements ProcessSession, ProvenanceE
     private Checkpoint checkpoint = new Checkpoint();
     private final ContentClaimWriteCache claimCache;
 
+    private List<ProcessSession> peerSessions = new ArrayList<>();
+
     public StandardProcessSession(final RepositoryContext context, final TaskTermination taskTermination) {
         this.context = context;
         this.taskTermination = taskTermination;
@@ -611,7 +613,10 @@ public final class StandardProcessSession implements ProcessSession, ProvenanceE
             final ProvenanceEventBuilder builder = entry.getValue();
             final FlowFile flowFile = entry.getKey();
 
-            updateEventContentClaims(builder, flowFile, checkpoint.records.get(flowFile));
+            StandardRepositoryRecord record = checkpoint.records.get(flowFile);
+            record = getRepositoryRecordFromPeer(flowFile, record);
+
+            updateEventContentClaims(builder, flowFile, record);
             final ProvenanceEventRecord event = builder.build();
 
             if (!event.getChildUuids().isEmpty() && !isSpuriousForkEvent(event, checkpoint.removedFlowFiles)) {
@@ -778,6 +783,21 @@ public final class StandardProcessSession implements ProcessSession, ProvenanceE
         };
 
         provenanceRepo.registerEvents(iterable);
+    }
+
+    private StandardRepositoryRecord getRepositoryRecordFromPeer(FlowFile flowFile, StandardRepositoryRecord record) {
+        StandardRepositoryRecord retVal = record;
+        if (record == null) {
+            for (ProcessSession session : peerSessions) {
+                StandardProcessSession peer = (StandardProcessSession)session;
+                retVal = peer.records.get(flowFile);
+                if (record != null) {
+                    break;
+                }
+            }
+        }
+
+        return retVal;
     }
 
     private void updateEventContentClaims(final ProvenanceEventBuilder builder, final FlowFile flowFile, final StandardRepositoryRecord repoRecord) {
@@ -1724,7 +1744,10 @@ public final class StandardProcessSession implements ProcessSession, ProvenanceE
             eventBuilder.setComponentType(processorType);
             eventBuilder.addParentFlowFile(parent);
 
-            updateEventContentClaims(eventBuilder, parent, records.get(parent));
+            StandardRepositoryRecord record = records.get(parent);
+            record = getRepositoryRecordFromPeer(parent, record);
+
+            updateEventContentClaims(eventBuilder, parent, record);
             forkEventBuilders.put(parent, eventBuilder);
         }
 
@@ -3308,6 +3331,11 @@ public final class StandardProcessSession implements ProcessSession, ProvenanceE
     public ProvenanceReporter getProvenanceReporter() {
         verifyTaskActive();
         return provenanceReporter;
+    }
+
+    @Override
+    public void addPeerSession(ProcessSession session) {
+        peerSessions.add(session);
     }
 
     @Override

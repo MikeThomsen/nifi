@@ -102,7 +102,7 @@ public class PutMongoRecord extends AbstractMongoProcessor {
     }
 
     @Override
-    public void onTrigger(final ProcessContext context, final ProcessSession session) throws ProcessException {
+    public void onTrigger(final ProcessContext context, final ProcessSession session, final ProcessSession session2) throws ProcessException {
         final FlowFile flowFile = session.get();
         if (flowFile == null) {
             return;

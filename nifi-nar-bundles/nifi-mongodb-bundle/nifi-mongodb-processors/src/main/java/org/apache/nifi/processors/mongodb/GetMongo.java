@@ -194,10 +194,10 @@ public class GetMongo extends AbstractMongoProcessor {
     }
 
     @Override
-    public void onTrigger(final ProcessContext context, final ProcessSession session) throws ProcessException {
+    public void onTrigger(final ProcessContext context, final ProcessSession session, final ProcessSession session2) throws ProcessException {
         FlowFile input = null;
         if (context.hasIncomingConnection()) {
-            input = session.get();
+            input = session2.get();
 
             if (input == null && context.hasNonLoopConnection()) {
                 return;
@@ -222,14 +222,14 @@ public class GetMongo extends AbstractMongoProcessor {
         } else {
             try {
                 ByteArrayOutputStream out = new ByteArrayOutputStream();
-                session.exportTo(input, out);
+                session2.exportTo(input, out);
                 out.close();
                 queryStr = new String(out.toByteArray());
                 query = Document.parse(queryStr);
             } catch (Exception ex) {
                 getLogger().error("Error reading flowfile", ex);
                 if (input != null) { //Likely culprit is a bad query
-                    session.transfer(input, REL_FAILURE);
+                    session2.transfer(input, REL_FAILURE);
                     return;
                 } else {
                     throw new ProcessException(ex);
@@ -318,7 +318,7 @@ public class GetMongo extends AbstractMongoProcessor {
                 }
 
                 if (input != null) {
-                    session.transfer(input, REL_ORIGINAL);
+                    session2.transfer(input, REL_ORIGINAL);
                 }
 
             } finally {
@@ -327,7 +327,7 @@ public class GetMongo extends AbstractMongoProcessor {
 
         } catch (final RuntimeException e) {
             if (input != null) {
-                session.transfer(input, REL_FAILURE);
+                session2.transfer(input, REL_FAILURE);
             }
             context.yield();
             logger.error("Failed to execute query {} due to {}", new Object[] { query, e }, e);

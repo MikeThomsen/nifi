@@ -91,7 +91,7 @@ public class AbstractMongoProcessorTest {
      */
     public static class MockAbstractMongoProcessor extends AbstractMongoProcessor {
         @Override
-        public void onTrigger(ProcessContext context, ProcessSession session) throws ProcessException {
+        public void onTrigger(ProcessContext context, ProcessSession session, final ProcessSession session2) throws ProcessException {
             // nothing to do
         }
 

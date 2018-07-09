@@ -253,6 +253,11 @@ public class BatchingSessionFactory implements ProcessSessionFactory {
         }
 
         @Override
+        public void addPeerSession(ProcessSession session) {
+            throw new UnsupportedOperationException("This is not supported yet.");
+        }
+
+        @Override
         public OutputStream write(final FlowFile source) {
             return session.write(source);
         }

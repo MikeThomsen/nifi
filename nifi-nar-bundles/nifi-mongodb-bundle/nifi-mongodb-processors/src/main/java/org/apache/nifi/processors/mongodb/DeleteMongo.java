@@ -125,7 +125,7 @@ public class DeleteMongo extends AbstractMongoProcessor {
     }
 
     @Override
-    public void onTrigger(ProcessContext context, ProcessSession session) throws ProcessException {
+    public void onTrigger(ProcessContext context, ProcessSession session, final ProcessSession session2) throws ProcessException {
         FlowFile flowFile = session.get();
         final WriteConcern writeConcern = getWriteConcern(context);
         final MongoCollection<Document> collection = getCollection(context, flowFile).withWriteConcern(writeConcern);

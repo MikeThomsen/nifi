@@ -35,6 +35,7 @@ import org.apache.nifi.components.PropertyDescriptor;
 import org.apache.nifi.expression.ExpressionLanguageScope;
 import org.apache.nifi.flowfile.FlowFile;
 import org.apache.nifi.processor.AbstractProcessor;
+import org.apache.nifi.processor.AbstractSplitSessionProcessor;
 import org.apache.nifi.processor.ProcessContext;
 import org.apache.nifi.processor.ProcessSession;
 import org.apache.nifi.processor.Relationship;
@@ -53,7 +54,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 
-public abstract class AbstractMongoProcessor extends AbstractProcessor {
+public abstract class AbstractMongoProcessor extends AbstractSplitSessionProcessor {
     static final String WRITE_CONCERN_ACKNOWLEDGED = "ACKNOWLEDGED";
     static final String WRITE_CONCERN_UNACKNOWLEDGED = "UNACKNOWLEDGED";
     static final String WRITE_CONCERN_FSYNCED = "FSYNCED";
@@ -302,6 +303,7 @@ public abstract class AbstractMongoProcessor extends AbstractProcessor {
         flowFile = session.putAllAttributes(flowFile, extraAttributes);
         session.getProvenanceReporter().receive(flowFile, getURI(context));
         session.transfer(flowFile, rel);
+        session.commit();
     }
 
     protected synchronized void configureMapper(String setting) {
