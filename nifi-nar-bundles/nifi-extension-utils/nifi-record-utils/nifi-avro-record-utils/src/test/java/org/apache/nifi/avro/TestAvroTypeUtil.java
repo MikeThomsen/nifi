@@ -346,7 +346,7 @@ public class TestAvroTypeUtil {
 
     @Test
     public void testToDecimalConversion() {
-        final LogicalTypes.Decimal decimalType = LogicalTypes.decimal(18, 8);
+        final LogicalTypes.Decimal decimalType = LogicalTypes.decimal(26, 8);
         final Schema fieldSchema = Schema.create(Type.BYTES);
         decimalType.addToSchema(fieldSchema);
 
@@ -763,9 +763,11 @@ public class TestAvroTypeUtil {
     }
 
     private Schema givenAvroSchemaContainingNumericMap() {
+       Map<String, Long> longs = new HashMap<>();
+       longs.put("x", 1l);
         final List<Field> avroFields = Arrays.asList(
-                new Field("id", Schema.create(Type.INT), "", ""),
-                new Field("numbers", Schema.createMap(Schema.create(Type.LONG)), "", "")
+                new Field("id", Schema.create(Type.INT), "", -1),
+                new Field("numbers", Schema.createMap(Schema.create(Type.LONG)), "", longs)
         );
 
         return Schema.createRecord(avroFields);

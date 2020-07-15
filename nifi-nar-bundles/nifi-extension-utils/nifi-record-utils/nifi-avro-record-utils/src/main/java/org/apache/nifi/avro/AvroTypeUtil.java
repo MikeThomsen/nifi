@@ -17,6 +17,7 @@
 
 package org.apache.nifi.avro;
 
+import org.apache.avro.AvroRuntimeException;
 import org.apache.avro.Conversions;
 import org.apache.avro.JsonProperties;
 import org.apache.avro.LogicalType;
@@ -313,7 +314,7 @@ public class AvroTypeUtil {
             return Schema.createUnion(unionTypes);
         }
 
-        return Schema.createUnion(Schema.create(Type.NULL), schema);
+        return Schema.createUnion(schema, Schema.create(Type.NULL));
     }
 
     /**
@@ -840,7 +841,12 @@ public class AvroTypeUtil {
 
         for (final RecordField recordField : recordSchema.getFields()) {
 
-            Object value = avroRecord.get(recordField.getFieldName());
+            Object value;
+            try {
+                value = avroRecord.get(recordField.getFieldName());
+            } catch (AvroRuntimeException are) {
+                value = null;
+            }
             if (value == null) {
                 for (final String alias : recordField.getAliases()) {
                     value = avroRecord.get(alias);
@@ -852,19 +858,19 @@ public class AvroTypeUtil {
 
             final String fieldName = recordField.getFieldName();
             try {
-            final Field avroField = avroRecord.getSchema().getField(fieldName);
-            if (avroField == null) {
-                values.put(fieldName, null);
-                continue;
-            }
+                final Field avroField = avroRecord.getSchema().getField(fieldName);
+                if (avroField == null) {
+                    values.put(fieldName, null);
+                    continue;
+                }
 
-            final Schema fieldSchema = avroField.schema();
-            final Object rawValue = normalizeValue(value, fieldSchema, fieldName);
+                final Schema fieldSchema = avroField.schema();
+                final Object rawValue = normalizeValue(value, fieldSchema, fieldName);
 
-            final DataType desiredType = recordField.getDataType();
-            final Object coercedValue = DataTypeUtils.convertType(rawValue, desiredType, fieldName, charset);
+                final DataType desiredType = recordField.getDataType();
+                final Object coercedValue = DataTypeUtils.convertType(rawValue, desiredType, fieldName, charset);
 
-            values.put(fieldName, coercedValue);
+                values.put(fieldName, coercedValue);
             } catch (Exception ex) {
                 logger.debug("fail to convert field " + fieldName, ex );
                 throw ex;
