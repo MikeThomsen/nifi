@@ -20,7 +20,9 @@ import org.apache.nifi.reporting.InitializationException;
 import org.apache.nifi.serialization.record.MockRecordParser;
 import org.apache.nifi.serialization.record.MockRecordWriter;
 import org.apache.nifi.serialization.record.RecordFieldType;
-import org.apache.nifi.util.*;
+import org.apache.nifi.util.MockFlowFile;
+import org.apache.nifi.util.TestRunner;
+import org.apache.nifi.util.TestRunners;
 import org.junit.Before;
 import org.junit.BeforeClass;
 import org.junit.Test;
@@ -29,13 +31,11 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
-import static org.apache.nifi.processors.standard.DetectDuplicateRecord.*;
 import static org.junit.Assert.assertEquals;
 
-public class TestDetectDuplicateRecord {
+public class TestInMemoryDeduplicateRecordSet {
 
     private TestRunner runner;
-    private MockCacheService cache;
     private MockRecordParser reader;
     private MockRecordWriter writer;
 
@@ -44,13 +44,13 @@ public class TestDetectDuplicateRecord {
         System.setProperty("org.slf4j.simpleLogger.defaultLogLevel", "info");
         System.setProperty("org.slf4j.simpleLogger.showDateTime", "true");
         System.setProperty("org.slf4j.simpleLogger.log.nifi.io.nio", "debug");
-        System.setProperty("org.slf4j.simpleLogger.log.nifi.processors.standard.DetectDuplicateRecord", "debug");
-        System.setProperty("org.slf4j.simpleLogger.log.nifi.processors.standard.TestDetectDuplicateRecord", "debug");
+        System.setProperty("org.slf4j.simpleLogger.log.nifi.processors.standard.InMemoryDeduplicateRecordSet", "debug");
+        System.setProperty("org.slf4j.simpleLogger.log.nifi.processors.standard.TestInMemoryDeduplicateRecordSet", "debug");
     }
 
     @Before
     public void setup() throws InitializationException {
-        runner = TestRunners.newTestRunner(DetectDuplicateRecord.class);
+        runner = TestRunners.newTestRunner(InMemoryDeduplicateRecordSet.class);
 
         // RECORD_READER, RECORD_WRITER
         reader = new MockRecordParser();
@@ -61,39 +61,27 @@ public class TestDetectDuplicateRecord {
         runner.addControllerService("writer", writer);
         runner.enableControllerService(writer);
 
-        runner.setProperty(RECORD_READER, "reader");
-        runner.setProperty(RECORD_WRITER, "writer");
+        runner.setProperty(InMemoryDeduplicateRecordSet.RECORD_READER, "reader");
+        runner.setProperty(InMemoryDeduplicateRecordSet.RECORD_WRITER, "writer");
 
         reader.addSchemaField("firstName", RecordFieldType.STRING);
         reader.addSchemaField("middleName", RecordFieldType.STRING);
         reader.addSchemaField("lastName", RecordFieldType.STRING);
 
         // INCLUDE_ZERO_RECORD_FLOWFILES
-        runner.setProperty(INCLUDE_ZERO_RECORD_FLOWFILES, "true");
-
-        // CACHE_IDENTIFIER
-        runner.setProperty(CACHE_IDENTIFIER, "true");
-
-        // DISTRIBUTED_CACHE_SERVICE
-        cache = new MockCacheService();
-        runner.addControllerService("cache", cache);
-        runner.setProperty(DISTRIBUTED_CACHE_SERVICE, "cache");
-        runner.enableControllerService(cache);
+        runner.setProperty(InMemoryDeduplicateRecordSet.INCLUDE_ZERO_RECORD_FLOWFILES, "true");
 
         // CACHE_ENTRY_IDENTIFIER
         final Map<String, String> props = new HashMap<>();
         props.put("hash.value", "1000");
         runner.enqueue(new byte[]{}, props);
 
-        // AGE_OFF_DURATION
-        runner.setProperty(AGE_OFF_DURATION, "48 hours");
-
         runner.assertValid();
     }
 
      @Test
      public void testDetectDuplicatesHashSet() {
-        runner.setProperty(FILTER_TYPE, HASH_SET_VALUE);
+        runner.setProperty(InMemoryDeduplicateRecordSet.FILTER_TYPE, InMemoryDeduplicateRecordSet.HASH_SET_VALUE);
         runner.setProperty("/middleName", "${field.value}");
         reader.addRecord("John", "Q", "Smith");
         reader.addRecord("John", "Q", "Smith");
@@ -107,8 +95,8 @@ public class TestDetectDuplicateRecord {
 
     @Test
     public void testDetectDuplicatesBloomFilter() {
-        runner.setProperty(FILTER_TYPE, BLOOM_FILTER_VALUE);
-        runner.setProperty(BLOOM_FILTER_FPP, "0.10");
+        runner.setProperty(InMemoryDeduplicateRecordSet.FILTER_TYPE, InMemoryDeduplicateRecordSet.BLOOM_FILTER_VALUE);
+        runner.setProperty(InMemoryDeduplicateRecordSet.BLOOM_FILTER_FPP, "0.10");
         runner.setProperty("/middleName", "${field.value}");
         reader.addRecord("John", "Q", "Smith");
         reader.addRecord("John", "Q", "Smith");
@@ -122,7 +110,7 @@ public class TestDetectDuplicateRecord {
 
     @Test
     public void testNoDuplicatesHashSet() {
-        runner.setProperty(FILTER_TYPE, HASH_SET_VALUE);
+        runner.setProperty(InMemoryDeduplicateRecordSet.FILTER_TYPE, InMemoryDeduplicateRecordSet.HASH_SET_VALUE);
         runner.setProperty("/middleName", "${field.value}");
         reader.addRecord("John", "Q", "Smith");
         reader.addRecord("Jack", "Z", "Brown");
@@ -136,8 +124,8 @@ public class TestDetectDuplicateRecord {
 
     @Test
     public void testNoDuplicatesBloomFilter() {
-        runner.setProperty(FILTER_TYPE, BLOOM_FILTER_VALUE);
-        runner.setProperty(BLOOM_FILTER_FPP, "0.10");
+        runner.setProperty(InMemoryDeduplicateRecordSet.FILTER_TYPE, InMemoryDeduplicateRecordSet.BLOOM_FILTER_VALUE);
+        runner.setProperty(InMemoryDeduplicateRecordSet.BLOOM_FILTER_FPP, "0.10");
         runner.setProperty("/middleName", "${field.value}");
         reader.addRecord("John", "Q", "Smith");
         reader.addRecord("Jack", "Z", "Brown");
@@ -158,7 +146,7 @@ public class TestDetectDuplicateRecord {
         runner.enqueue("");
         runner.run();
 
-        doCountTests(0, 1, 1, 0, 1, 2);
+        doCountTests(0, 1, 1, 1, 1, 2);
     }
 
     @Test
@@ -173,35 +161,32 @@ public class TestDetectDuplicateRecord {
         doCountTests(0, 1, 1, 1, 3, 0);
     }
 
-
-
     @Test
     public void testCacheValueFromRecordPath() {
-        runner.setProperty(CACHE_ENTRY_IDENTIFIER, "Users");
         reader.addRecord("John", "Q", "Smith");
         reader.addRecord("Jack", "Z", "Brown");
-        reader.addRecord("Jane", "X", "Doe");
+        reader.addRecord("Jack", "Z", "Brown");
 
         runner.enqueue("");
         runner.run();
 
         doCountTests(0, 1, 1, 1, 2, 1);
 
-        cache.assertContains("KEY", "VALUE"); // TODO: Get the tests running so you can see what the key/value is in serialized form
+//        cache.assertContains("KEY", "VALUE"); // TODO: Get the tests running so you can see what the key/value is in serialized form
     }
 
     void doCountTests(int failure, int original, int duplicates, int notDuplicates, int notDupeCount, int dupeCount) {
-        runner.assertTransferCount(REL_DUPLICATE, duplicates);
-        runner.assertTransferCount(REL_NON_DUPLICATE, notDuplicates);
-        runner.assertTransferCount(REL_ORIGINAL, original);
-        runner.assertTransferCount(REL_FAILURE, failure);
+        runner.assertTransferCount(InMemoryDeduplicateRecordSet.REL_DUPLICATE, duplicates);
+        runner.assertTransferCount(InMemoryDeduplicateRecordSet.REL_NON_DUPLICATE, notDuplicates);
+        runner.assertTransferCount(InMemoryDeduplicateRecordSet.REL_ORIGINAL, original);
+        runner.assertTransferCount(InMemoryDeduplicateRecordSet.REL_FAILURE, failure);
 
-        List<MockFlowFile> duplicateFlowFile = runner.getFlowFilesForRelationship(REL_DUPLICATE);
+        List<MockFlowFile> duplicateFlowFile = runner.getFlowFilesForRelationship(InMemoryDeduplicateRecordSet.REL_DUPLICATE);
         if (duplicateFlowFile != null) {
             assertEquals(String.valueOf(dupeCount), duplicateFlowFile.get(0).getAttribute("record.count"));
         }
 
-        List<MockFlowFile> nonDuplicateFlowFile = runner.getFlowFilesForRelationship(REL_NON_DUPLICATE);
+        List<MockFlowFile> nonDuplicateFlowFile = runner.getFlowFilesForRelationship(InMemoryDeduplicateRecordSet.REL_NON_DUPLICATE);
         if (nonDuplicateFlowFile != null) {
             assertEquals(String.valueOf(notDupeCount), nonDuplicateFlowFile.get(0).getAttribute("record.count"));
         }

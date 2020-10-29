@@ -22,24 +22,32 @@ import com.google.common.hash.Funnels;
 import org.apache.commons.codec.binary.Hex;
 import org.apache.commons.codec.digest.DigestUtils;
 import org.apache.commons.codec.digest.MessageDigestAlgorithms;
-import org.apache.nifi.annotation.behavior.*;
+import org.apache.nifi.annotation.behavior.DynamicProperty;
+import org.apache.nifi.annotation.behavior.EventDriven;
+import org.apache.nifi.annotation.behavior.InputRequirement;
 import org.apache.nifi.annotation.behavior.InputRequirement.Requirement;
+import org.apache.nifi.annotation.behavior.SupportsBatching;
+import org.apache.nifi.annotation.behavior.SystemResource;
+import org.apache.nifi.annotation.behavior.SystemResourceConsideration;
+import org.apache.nifi.annotation.behavior.WritesAttribute;
 import org.apache.nifi.annotation.documentation.CapabilityDescription;
 import org.apache.nifi.annotation.documentation.SeeAlso;
 import org.apache.nifi.annotation.documentation.Tags;
 import org.apache.nifi.annotation.lifecycle.OnScheduled;
-import org.apache.nifi.components.*;
-import org.apache.nifi.distributed.cache.client.Deserializer;
-import org.apache.nifi.distributed.cache.client.DistributedMapCacheClient;
-import org.apache.nifi.distributed.cache.client.Serializer;
-import org.apache.nifi.distributed.cache.client.exception.DeserializationException;
-import org.apache.nifi.distributed.cache.client.exception.SerializationException;
-import org.apache.nifi.expression.AttributeExpression.ResultType;
+import org.apache.nifi.components.AllowableValue;
+import org.apache.nifi.components.PropertyDescriptor;
+import org.apache.nifi.components.PropertyValue;
+import org.apache.nifi.components.ValidationContext;
+import org.apache.nifi.components.ValidationResult;
 import org.apache.nifi.expression.ExpressionLanguageScope;
 import org.apache.nifi.flowfile.FlowFile;
 import org.apache.nifi.flowfile.attributes.CoreAttributes;
 import org.apache.nifi.logging.ComponentLog;
-import org.apache.nifi.processor.*;
+import org.apache.nifi.processor.AbstractProcessor;
+import org.apache.nifi.processor.ProcessContext;
+import org.apache.nifi.processor.ProcessSession;
+import org.apache.nifi.processor.ProcessorInitializationContext;
+import org.apache.nifi.processor.Relationship;
 import org.apache.nifi.processor.exception.ProcessException;
 import org.apache.nifi.processor.util.StandardValidators;
 import org.apache.nifi.record.path.FieldValue;
@@ -48,23 +56,32 @@ import org.apache.nifi.record.path.RecordPathResult;
 import org.apache.nifi.record.path.util.RecordPathCache;
 import org.apache.nifi.record.path.validation.RecordPathPropertyNameValidator;
 import org.apache.nifi.record.path.validation.RecordPathValidator;
-import org.apache.nifi.schema.access.SchemaNotFoundException;
-import org.apache.nifi.serialization.*;
+import org.apache.nifi.serialization.RecordReader;
+import org.apache.nifi.serialization.RecordReaderFactory;
+import org.apache.nifi.serialization.RecordSetWriter;
+import org.apache.nifi.serialization.RecordSetWriterFactory;
+import org.apache.nifi.serialization.WriteResult;
 import org.apache.nifi.serialization.record.Record;
 import org.apache.nifi.serialization.record.RecordSchema;
 import org.apache.nifi.serialization.record.util.DataTypeUtils;
 
-import java.io.*;
+import java.io.InputStream;
+import java.io.OutputStream;
+import java.io.Serializable;
 import java.nio.charset.Charset;
-import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
-import java.util.*;
-import java.util.concurrent.TimeUnit;
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
 import java.util.stream.Collectors;
 
 import static java.util.stream.Collectors.toList;
 import static org.apache.commons.codec.binary.StringUtils.getBytesUtf8;
-import static org.apache.commons.lang3.StringUtils.*;
 
 @EventDriven
 @SupportsBatching
@@ -74,10 +91,8 @@ import static org.apache.commons.lang3.StringUtils.*;
         "The BloomFilter type will use constant memory regardless of the number of records processed.")
 @Tags({"text", "record", "update", "change", "replace", "modify", "distinct", "unique",
     "filter", "hash", "dupe", "duplicate", "dedupe"})
-@CapabilityDescription("Caches records from each incoming FlowFile and determines if the record " +
-    "has already been seen. If so, routes the record to 'duplicate'. If the record is " +
-    "not determined to be a duplicate, it is routed to 'non-duplicate'."
-)
+@CapabilityDescription("This processor attempts to deduplicate a record set in memory using either a hashset or a bloom filter. " +
+        "It operates on a per-file basis rather than across an entire data set that spans multiple files.")
 @WritesAttribute(attribute = "record.count", description = "The number of records processed.")
 @DynamicProperty(
     name = "RecordPath",
@@ -89,7 +104,7 @@ import static org.apache.commons.lang3.StringUtils.*;
     "org.apache.nifi.distributed.cache.server.map.DistributedMapCacheServer",
     "org.apache.nifi.processors.standard.DetectDuplicate"
 })
-public class DetectDuplicateRecord extends AbstractProcessor {
+public class InMemoryDeduplicateRecordSet extends AbstractProcessor {
 
     private static final String FIELD_NAME = "field.name";
     private static final String FIELD_VALUE = "field.value";
@@ -148,47 +163,6 @@ public class DetectDuplicateRecord extends AbstractProcessor {
             .allowableValues("true", "false")
             .defaultValue("true")
             .required(true)
-            .build();
-
-    static final PropertyDescriptor CACHE_IDENTIFIER = new PropertyDescriptor.Builder()
-            .name("cache-the-entry-identifier")
-            .displayName("Cache The Entry Identifier")
-            .description("When true this cause the processor to check for duplicates and cache the Entry Identifier. When false, "
-                    + "the processor would only check for duplicates and not cache the Entry Identifier, requiring another "
-                    + "processor to add identifiers to the distributed cache.")
-            .required(true)
-            .allowableValues("true", "false")
-            .defaultValue("true")
-            .build();
-
-    static final PropertyDescriptor DISTRIBUTED_CACHE_SERVICE = new PropertyDescriptor.Builder()
-            .name("distributed-cache-service")
-            .displayName("Distributed Cache Service")
-            .description("The Controller Service that is used to cache unique records, used to determine duplicates")
-            .required(false)
-            .identifiesControllerService(DistributedMapCacheClient.class)
-            .build();
-
-    static final PropertyDescriptor CACHE_ENTRY_IDENTIFIER = new PropertyDescriptor.Builder()
-            .name("cache-entry-identifier")
-            .displayName("Cache Entry Identifier")
-            .description(
-                    "A FlowFile attribute, or the results of an Attribute Expression Language statement, which will be evaluated " +
-                            "against a FlowFile in order to determine the cached filter type value used to identify duplicates.")
-            .required(false)
-            .addValidator(StandardValidators.createAttributeExpressionLanguageValidator(ResultType.STRING, true))
-            .defaultValue("${hash.value}")
-            .expressionLanguageSupported(ExpressionLanguageScope.FLOWFILE_ATTRIBUTES)
-            .build();
-
-    static final PropertyDescriptor AGE_OFF_DURATION = new PropertyDescriptor.Builder()
-            .name("age-off-duration")
-            .displayName("Age Off Duration")
-            .description("Time interval to age off cached filter entries. When the cache expires, the entire filter and its values " +
-                    "are destroyed. Leaving this value empty will cause the cached entries to never expire but may eventually be rotated " +
-                    "out when the cache servers rotation policy automatically expires entries.")
-            .required(false)
-            .addValidator(StandardValidators.TIME_PERIOD_VALIDATOR)
             .build();
 
     static final PropertyDescriptor RECORD_HASHING_ALGORITHM = new PropertyDescriptor.Builder()
@@ -269,20 +243,12 @@ public class DetectDuplicateRecord extends AbstractProcessor {
 
     private Set<Relationship> relationships;
 
-    private final Serializer<String> keySerializer = new StringSerializer();
-    private final Serializer<CacheValue> cacheValueSerializer = new CacheValueSerializer();
-    private final Deserializer<CacheValue> cacheValueDeserializer = new CacheValueDeserializer();
-
     @Override
     protected void init(final ProcessorInitializationContext context) {
         final List<PropertyDescriptor> descriptors = new ArrayList<>();
         descriptors.add(RECORD_READER);
         descriptors.add(RECORD_WRITER);
         descriptors.add(INCLUDE_ZERO_RECORD_FLOWFILES);
-        descriptors.add(CACHE_IDENTIFIER);
-        descriptors.add(CACHE_ENTRY_IDENTIFIER);
-        descriptors.add(AGE_OFF_DURATION);
-        descriptors.add(DISTRIBUTED_CACHE_SERVICE);
         descriptors.add(RECORD_HASHING_ALGORITHM);
         descriptors.add(FILTER_TYPE);
         descriptors.add(FILTER_CAPACITY_HINT);
@@ -334,7 +300,7 @@ public class DetectDuplicateRecord extends AbstractProcessor {
                         validationContext
                 )).collect(Collectors.toList());
 
-        if(validationContext.getProperty(BLOOM_FILTER_FPP).isSet()) {
+        if (validationContext.getProperty(BLOOM_FILTER_FPP).isSet()) {
             final double falsePositiveProbability = validationContext.getProperty(BLOOM_FILTER_FPP).asDouble();
             if (falsePositiveProbability < 0 || falsePositiveProbability > 1) {
                 validationResults.add(
@@ -344,26 +310,6 @@ public class DetectDuplicateRecord extends AbstractProcessor {
                                 .explanation("Valid values are 0.0 - 1.0 inclusive")
                                 .valid(false).build());
             }
-        }
-
-        if(validationContext.getProperty(CACHE_IDENTIFIER).asBoolean()) {
-            if(!validationContext.getProperty(DISTRIBUTED_CACHE_SERVICE).isSet())
-                validationResults.add(new ValidationResult.Builder()
-                        .subject(DISTRIBUTED_CACHE_SERVICE.getName())
-                        .explanation(DISTRIBUTED_CACHE_SERVICE.getName() + " is required when " + CACHE_IDENTIFIER.getName() + " is true.")
-                        .valid(false).build());
-
-            if(!validationContext.getProperty(CACHE_ENTRY_IDENTIFIER).isSet())
-                validationResults.add(new ValidationResult.Builder()
-                        .subject(CACHE_ENTRY_IDENTIFIER.getName())
-                        .explanation(CACHE_ENTRY_IDENTIFIER.getName() + " is required when " + CACHE_IDENTIFIER.getName() + " is true.")
-                        .valid(false).build());
-
-            if(!validationContext.getProperty(AGE_OFF_DURATION).isSet())
-                validationResults.add(new ValidationResult.Builder()
-                        .subject(AGE_OFF_DURATION.getName())
-                        .explanation(AGE_OFF_DURATION.getName() + " is required when " + CACHE_IDENTIFIER.getName() + " is true.")
-                        .valid(false).build());
         }
 
         return validationResults;
@@ -390,22 +336,13 @@ public class DetectDuplicateRecord extends AbstractProcessor {
         }
 
         final ComponentLog logger = getLogger();
-        final String cacheKey = context.getProperty(CACHE_ENTRY_IDENTIFIER).evaluateAttributeExpressions(flowFile).getValue();
-
-        if (isBlank(cacheKey)) {
-            logger.error("FlowFile {} has no attribute for given Cache Entry Identifier", new Object[]{flowFile});
-            session.transfer(session.penalize(flowFile), REL_FAILURE);
-            return;
-        }
 
         FlowFile nonDuplicatesFlowFile = session.create(flowFile);
         FlowFile duplicatesFlowFile = session.create(flowFile);
 
         try {
             final long now = System.currentTimeMillis();
-            final DistributedMapCacheClient cache = context.getProperty(DISTRIBUTED_CACHE_SERVICE).asControllerService(DistributedMapCacheClient.class);
 
-            final boolean shouldCacheIdentifier = context.getProperty(CACHE_IDENTIFIER).asBoolean();
             final int filterCapacity = context.getProperty(FILTER_CAPACITY_HINT).asInteger();
             Serializable serializableFilter = context.getProperty(FILTER_TYPE).getValue()
                     .equals(context.getProperty(HASH_SET_VALUE.getValue()))
@@ -414,18 +351,6 @@ public class DetectDuplicateRecord extends AbstractProcessor {
                     Funnels.stringFunnel(Charset.defaultCharset()),
                     filterCapacity,
                     context.getProperty(BLOOM_FILTER_FPP).asDouble());
-
-            if(shouldCacheIdentifier && cache.containsKey(cacheKey, keySerializer)) {
-                CacheValue cacheValue = cache.get(cacheKey, keySerializer, cacheValueDeserializer);
-                Long durationMS = context.getProperty(AGE_OFF_DURATION).asTimePeriod(TimeUnit.MILLISECONDS);
-
-                if(durationMS != null && (now >= cacheValue.getEntryTimeMS() + durationMS)) {
-                    boolean status = cache.remove(cacheKey, keySerializer);
-                    logger.debug("Removal of expired cached entry with key {} returned {}", new Object[]{cacheKey, status});
-                } else {
-                    serializableFilter = cacheValue.getFilter();
-                }
-            }
 
             final FilterWrapper filter = FilterWrapper.create(serializableFilter);
 
@@ -437,11 +362,18 @@ public class DetectDuplicateRecord extends AbstractProcessor {
 
             final RecordReaderFactory readerFactory = context.getProperty(RECORD_READER).asControllerService(RecordReaderFactory.class);
             final RecordSetWriterFactory writerFactory = context.getProperty(RECORD_WRITER).asControllerService(RecordSetWriterFactory.class);
-            final RecordReader reader = readerFactory.createRecordReader(flowFile.getAttributes(), session.read(flowFile), logger);
+
+            final InputStream inputStream = session.read(flowFile);
+
+            final RecordReader reader = readerFactory.createRecordReader(flowFile, inputStream, logger);
 
             final RecordSchema writeSchema = writerFactory.getSchema(flowFile.getAttributes(), reader.getSchema());
-            final RecordSetWriter nonDuplicatesWriter = writerFactory.createWriter(getLogger(), writeSchema, session.write(nonDuplicatesFlowFile));
-            final RecordSetWriter duplicatesWriter = writerFactory.createWriter(getLogger(), writeSchema, session.write(duplicatesFlowFile));
+
+            final OutputStream nonDupeStream = session.write(nonDuplicatesFlowFile);
+            final OutputStream dupeStream = session.write(duplicatesFlowFile);
+
+            final RecordSetWriter nonDuplicatesWriter = writerFactory.createWriter(getLogger(), writeSchema, nonDupeStream);
+            final RecordSetWriter duplicatesWriter = writerFactory.createWriter(getLogger(), writeSchema, dupeStream);
 
             nonDuplicatesWriter.beginRecordSet();
             duplicatesWriter.beginRecordSet();
@@ -495,6 +427,9 @@ public class DetectDuplicateRecord extends AbstractProcessor {
                 filter.put(recordHash);
             }
 
+            reader.close();
+            inputStream.close();
+
             final boolean includeZeroRecordFlowFiles = context.getProperty(INCLUDE_ZERO_RECORD_FLOWFILES).isSet()
                     ? context.getProperty(INCLUDE_ZERO_RECORD_FLOWFILES).asBoolean()
                     : true;
@@ -502,6 +437,7 @@ public class DetectDuplicateRecord extends AbstractProcessor {
             // Route Non-Duplicates FlowFile
             final WriteResult nonDuplicatesWriteResult = nonDuplicatesWriter.finishRecordSet();
             nonDuplicatesWriter.close();
+            nonDupeStream.close();
             Map<String, String> attributes = new HashMap<>();
             attributes.putAll(nonDuplicatesWriteResult.getAttributes());
             attributes.put("record.count", String.valueOf(nonDuplicatesWriteResult.getRecordCount()));
@@ -509,21 +445,21 @@ public class DetectDuplicateRecord extends AbstractProcessor {
             nonDuplicatesFlowFile = session.putAllAttributes(nonDuplicatesFlowFile, attributes);
             logger.info("Successfully found {} unique records for {}", new Object[] {nonDuplicatesWriteResult.getRecordCount(), nonDuplicatesFlowFile});
 
-            if(!includeZeroRecordFlowFiles && nonDuplicatesWriteResult.getRecordCount() == 0) {
-                session.remove(nonDuplicatesFlowFile);
-            } else {
-                session.transfer(nonDuplicatesFlowFile, REL_NON_DUPLICATE);
-            }
-
             // Route Duplicates FlowFile
             final WriteResult duplicatesWriteResult = duplicatesWriter.finishRecordSet();
             duplicatesWriter.close();
+            dupeStream.close();
             attributes.clear();
             attributes.putAll(duplicatesWriteResult.getAttributes());
             attributes.put("record.count", String.valueOf(duplicatesWriteResult.getRecordCount()));
             attributes.put(CoreAttributes.MIME_TYPE.key(), duplicatesWriter.getMimeType());
-            duplicatesFlowFile = session.putAllAttributes(nonDuplicatesFlowFile, attributes);
+            duplicatesFlowFile = session.putAllAttributes(duplicatesFlowFile, attributes);
             logger.info("Successfully found {} duplicate records for {}", new Object[] {duplicatesWriteResult.getRecordCount(), nonDuplicatesFlowFile});
+
+
+
+            session.adjustCounter("Records Processed",
+                    nonDuplicatesWriteResult.getRecordCount() + duplicatesWriteResult.getRecordCount(), false);
 
             if(!includeZeroRecordFlowFiles && duplicatesWriteResult.getRecordCount() == 0) {
                 session.remove(duplicatesFlowFile);
@@ -531,12 +467,10 @@ public class DetectDuplicateRecord extends AbstractProcessor {
                 session.transfer(duplicatesFlowFile, REL_DUPLICATE);
             }
 
-            session.adjustCounter("Records Processed",
-                    nonDuplicatesWriteResult.getRecordCount() + duplicatesWriteResult.getRecordCount(), false);
-
-            if(shouldCacheIdentifier) {
-                CacheValue cacheValue = new CacheValue(serializableFilter, now);
-                cache.put(cacheKey, cacheValue, keySerializer, cacheValueSerializer);
+            if(!includeZeroRecordFlowFiles && nonDuplicatesWriteResult.getRecordCount() == 0) {
+                session.remove(nonDuplicatesFlowFile);
+            } else {
+                session.transfer(nonDuplicatesFlowFile, REL_NON_DUPLICATE);
             }
 
             session.transfer(flowFile, REL_ORIGINAL);
@@ -616,33 +550,6 @@ public class DetectDuplicateRecord extends AbstractProcessor {
 
         public long getEntryTimeMS() {
             return entryTimeMS;
-        }
-    }
-
-    private static class CacheValueSerializer implements Serializer<CacheValue> {
-        @Override
-        public void serialize(CacheValue cacheValue, OutputStream outputStream) throws SerializationException, IOException {
-            new ObjectOutputStream(outputStream).writeObject(cacheValue);
-        }
-    }
-
-    private static class CacheValueDeserializer implements Deserializer<CacheValue> {
-        @Override
-        public CacheValue deserialize(byte[] bytes) throws DeserializationException, IOException {
-            try {
-                return (CacheValue) new ObjectInputStream(new ByteArrayInputStream(bytes)).readObject();
-            } catch (ClassNotFoundException e) {
-                e.printStackTrace();
-            }
-            return null;
-        }
-    }
-
-    private static class StringSerializer implements Serializer<String> {
-
-        @Override
-        public void serialize(final String value, final OutputStream out) throws SerializationException, IOException {
-            out.write(value.getBytes(StandardCharsets.UTF_8));
         }
     }
 }
