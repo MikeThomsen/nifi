@@ -94,6 +94,10 @@ import static org.apache.commons.codec.binary.StringUtils.getBytesUtf8;
 @SystemResourceConsideration(resource = SystemResource.MEMORY,
     description = "The HashSet filter type will grow memory space proportionate to the number of unique records processed. " +
         "The BloomFilter type will use constant memory regardless of the number of records processed.")
+@SystemResourceConsideration(resource = SystemResource.CPU,
+    description =  "If a more advanced hash algorithm is chosen, the amount of time required to hash any particular " +
+            "record could increase substantially."
+)
 @Tags({"text", "record", "update", "change", "replace", "modify", "distinct", "unique",
     "filter", "hash", "dupe", "duplicate", "dedupe"})
 @CapabilityDescription("This processor attempts to deduplicate a record set in memory using either a hashset or a bloom filter. " +
@@ -160,15 +164,15 @@ public class DeduplicateRecords extends AbstractProcessor {
             .build();
 
     static final AllowableValue OPTION_SINGLE_FILE = new AllowableValue("single", "Single File");
-    static final AllowableValue OPTION_DATA_LAKE = new AllowableValue("dataLake", "Data Lake");
+    static final AllowableValue OPTION_MULTIPLE_FILES = new AllowableValue("multiple", "Multiple Files");
 
     static final PropertyDescriptor DEDUPLICATION_STRATEGY = new PropertyDescriptor.Builder()
             .name("deduplication-strategy")
             .displayName("Deduplication Strategy")
             .description("The strategy to use for detecting and isolating duplicate records. The option for doing it " +
-                    "across a single data file will operate in memory, whereas the one for going across the enter data lake " +
+                    "across a single data file will operate in memory, whereas the one for going across the enter repository " +
                     "will require a distributed map cache.")
-            .allowableValues(OPTION_SINGLE_FILE, OPTION_DATA_LAKE)
+            .allowableValues(OPTION_SINGLE_FILE, OPTION_MULTIPLE_FILES)
             .defaultValue(OPTION_SINGLE_FILE.getValue())
             .required(true)
             .build();
@@ -176,13 +180,14 @@ public class DeduplicateRecords extends AbstractProcessor {
     static final PropertyDescriptor DISTRIBUTED_MAP_CACHE = new PropertyDescriptor.Builder()
             .name("distributed-map-cache")
             .displayName("Distributed Map Cache client")
-            .description("This configuration is required when the deduplication strategy is set to 'across data lake.' The map " +
+            .description("This configuration is required when the deduplication strategy is set to 'multiple files.' The map " +
                     "cache will be used to check a data source such as HBase or Redis for entries indicating that a record has " +
                     "been processed before. This option requires a downstream process that uses PutDistributedMapCache to write " +
                     "an entry to the cache data source once the record has been processed to indicate that it has been handled before.")
             .identifiesControllerService(DistributedMapCacheClient.class)
             .required(false)
             .addValidator(Validator.VALID)
+            .dependsOn(DEDUPLICATION_STRATEGY, OPTION_MULTIPLE_FILES)
             .build();
 
     static final PropertyDescriptor CACHE_IDENTIFIER = new PropertyDescriptor.Builder()
@@ -194,6 +199,7 @@ public class DeduplicateRecords extends AbstractProcessor {
             .expressionLanguageSupported(ExpressionLanguageScope.FLOWFILE_ATTRIBUTES)
             .required(false)
             .addValidator(Validator.VALID)
+            .dependsOn(DEDUPLICATION_STRATEGY, OPTION_MULTIPLE_FILES)
             .build();
 
     static final PropertyDescriptor INCLUDE_ZERO_RECORD_FLOWFILES = new PropertyDescriptor.Builder()
@@ -218,7 +224,7 @@ public class DeduplicateRecords extends AbstractProcessor {
                     SHA256_ALGORITHM_VALUE,
                     SHA512_ALGORITHM_VALUE
             )
-            .defaultValue(SHA1_ALGORITHM_VALUE.getValue())
+            .defaultValue(SHA256_ALGORITHM_VALUE.getValue())
             .expressionLanguageSupported(ExpressionLanguageScope.NONE)
             .required(true)
             .build();
@@ -232,6 +238,7 @@ public class DeduplicateRecords extends AbstractProcessor {
                     BLOOM_FILTER_VALUE
             )
             .defaultValue(HASH_SET_VALUE.getValue())
+            .dependsOn(DEDUPLICATION_STRATEGY, OPTION_SINGLE_FILE)
             .required(true)
             .build();
 
@@ -243,6 +250,7 @@ public class DeduplicateRecords extends AbstractProcessor {
             .defaultValue("25000")
             .expressionLanguageSupported(ExpressionLanguageScope.NONE)
             .addValidator(StandardValidators.INTEGER_VALIDATOR)
+            .dependsOn(FILTER_TYPE, BLOOM_FILTER_VALUE)
             .required(true)
             .build();
 
@@ -361,7 +369,7 @@ public class DeduplicateRecords extends AbstractProcessor {
             if (!context.getProperty(DISTRIBUTED_MAP_CACHE).isSet()) {
                 validationResults.add(new ValidationResult.Builder()
                         .subject(DISTRIBUTED_MAP_CACHE.getName())
-                        .explanation("Data lake-level deduplication was chosen, but a distributed map cache client was " +
+                        .explanation("Multiple files deduplication was chosen, but a distributed map cache client was " +
                                 "not configured")
                         .valid(false).build());
             }
@@ -395,7 +403,9 @@ public class DeduplicateRecords extends AbstractProcessor {
         readerFactory = context.getProperty(RECORD_READER).asControllerService(RecordReaderFactory.class);
         writerFactory = context.getProperty(RECORD_WRITER).asControllerService(RecordSetWriterFactory.class);
 
-        useInMemoryStrategy = context.getProperty(DEDUPLICATION_STRATEGY).getValue().equals(OPTION_SINGLE_FILE.getValue());
+        String strategy = context.getProperty(DEDUPLICATION_STRATEGY).getValue();
+
+        useInMemoryStrategy = strategy.equals(OPTION_SINGLE_FILE.getValue());
     }
 
     private FilterWrapper getFilter(ProcessContext context) {
@@ -414,6 +424,8 @@ public class DeduplicateRecords extends AbstractProcessor {
             return new DistributedMapCacheClientWrapper(mapCacheClient);
         }
     }
+
+    public static final char JOIN_CHAR = '~';
 
     @Override
     public void onTrigger(final ProcessContext context, final ProcessSession session) throws ProcessException {
@@ -459,7 +471,7 @@ public class DeduplicateRecords extends AbstractProcessor {
                 String recordValue;
 
                 if (matchWholeRecord) {
-                    recordValue = Joiner.on('~').join(record.getValues());
+                    recordValue = Joiner.on(JOIN_CHAR).join(record.getValues());
                 } else {
                     recordValue = executeDynamicRecordPaths(context, record, flowFile);
                 }
@@ -573,7 +585,7 @@ public class DeduplicateRecords extends AbstractProcessor {
             );
         }
 
-        return Joiner.on('~').join(fieldValues);
+        return Joiner.on(JOIN_CHAR).join(fieldValues);
     }
 
     private abstract static class FilterWrapper {

@@ -68,6 +68,7 @@ public class TestDeduplicateRecords {
 
         runner.setProperty(DeduplicateRecords.RECORD_READER, "reader");
         runner.setProperty(DeduplicateRecords.RECORD_WRITER, "writer");
+        runner.setProperty(DeduplicateRecords.RECORD_HASHING_ALGORITHM, DeduplicateRecords.SHA1_ALGORITHM_VALUE);
 
         reader.addSchemaField("firstName", RecordFieldType.STRING);
         reader.addSchemaField("middleName", RecordFieldType.STRING);
@@ -187,8 +188,6 @@ public class TestDeduplicateRecords {
         runner.run();
 
         doCountTests(0, 1, 1, 1, 2, 1);
-
-//        cache.assertContains("KEY", "VALUE"); // TODO: Get the tests running so you can see what the key/value is in serialized form
     }
 
     /*
@@ -196,22 +195,25 @@ public class TestDeduplicateRecords {
      */
 
     @Test
-    public void testDataLakeDeduplicationRequiresDMC() {
-        runner.setProperty(DeduplicateRecords.DEDUPLICATION_STRATEGY, DeduplicateRecords.OPTION_DATA_LAKE.getValue());
+    public void testMultipleFileDeduplicationRequiresDMC() {
+        runner.setProperty(DeduplicateRecords.DEDUPLICATION_STRATEGY, DeduplicateRecords.OPTION_MULTIPLE_FILES.getValue());
         runner.assertNotValid();
     }
+
+    public static final String FIRST_KEY = "2875ba79836587028a920875a18ee5dceb837587";
+    public static final String SECOND_KEY = "6eeba6ecf9d263582f463890be339dbecbaf23c8";
 
     @Test
     public void testDeduplicateWithDMC() throws Exception {
         DistributedMapCacheClient dmc = new MockCacheService<>();
         runner.addControllerService("dmc", dmc);
         runner.setProperty(DeduplicateRecords.DISTRIBUTED_MAP_CACHE, "dmc");
-        runner.setProperty(DeduplicateRecords.DEDUPLICATION_STRATEGY, DeduplicateRecords.OPTION_DATA_LAKE.getValue());
+        runner.setProperty(DeduplicateRecords.DEDUPLICATION_STRATEGY, DeduplicateRecords.OPTION_MULTIPLE_FILES.getValue());
         runner.enableControllerService(dmc);
         runner.assertValid();
 
-        dmc.put("2875ba79836587028a920875a18ee5dceb837587", true, null, null);
-        dmc.put("6eeba6ecf9d263582f463890be339dbecbaf23c8", true, null, null);
+        dmc.put(FIRST_KEY, true, null, null);
+        dmc.put(SECOND_KEY, true, null, null);
 
         reader.addRecord("John", "Q", "Smith");
         reader.addRecord("Jack", "Z", "Brown");
@@ -229,13 +231,13 @@ public class TestDeduplicateRecords {
         DistributedMapCacheClient dmc = new MockCacheService<>();
         runner.addControllerService("dmc", dmc);
         runner.setProperty(DeduplicateRecords.DISTRIBUTED_MAP_CACHE, "dmc");
-        runner.setProperty(DeduplicateRecords.DEDUPLICATION_STRATEGY, DeduplicateRecords.OPTION_DATA_LAKE.getValue());
+        runner.setProperty(DeduplicateRecords.DEDUPLICATION_STRATEGY, DeduplicateRecords.OPTION_MULTIPLE_FILES.getValue());
         runner.setProperty(DeduplicateRecords.CACHE_IDENTIFIER, "concat('${user.name}', '${record.hash.value}')");
         runner.enableControllerService(dmc);
         runner.assertValid();
 
-        dmc.put("john.smith-2875ba79836587028a920875a18ee5dceb837587", true, null, null);
-        dmc.put("john.smith-6eeba6ecf9d263582f463890be339dbecbaf23c8", true, null, null);
+        dmc.put(String.format("john.smith-%s", FIRST_KEY), true, null, null);
+        dmc.put(String.format("john.smith-%s", SECOND_KEY), true, null, null);
 
         reader.addRecord("John", "Q", "Smith");
         reader.addRecord("Jack", "Z", "Brown");
