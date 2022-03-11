@@ -25,9 +25,23 @@ import javax.script.ScriptException;
 public class KotlinScriptRunner extends BaseScriptRunner {
     private final CompiledScript compiledScript;
 
+    private static final String PRELOADS =
+            "import org.apache.nifi.components.*\n"
+                    + "import org.apache.nifi.flowfile.FlowFile\n"
+                    + "import org.apache.nifi.processor.*\n"
+                    + "import org.apache.nifi.processor.exception.*\n"
+                    + "import org.apache.nifi.processor.io.*\n"
+                    + "import org.apache.nifi.processor.util.*\n"
+                    + "import org.apache.nifi.processors.script.*\n"
+                    + "import org.apache.nifi.logging.ComponentLog\n"
+                    + "import org.apache.nifi.script.*\n"
+                    + "import org.apache.nifi.record.sink.*\n"
+                    + "import org.apache.nifi.lookup.*\n";
+
     public KotlinScriptRunner(ScriptEngine engine, String scriptBody, String[] modulePaths) throws ScriptException {
         super(engine, scriptBody, modulePaths);
-        compiledScript = ((Compilable) engine).compile(scriptBody);
+        String combined = PRELOADS + scriptBody;
+        compiledScript = ((Compilable) engine).compile(combined);
     }
 
     @Override
