@@ -36,12 +36,15 @@ public class KotlinScriptRunner extends BaseScriptRunner {
                     + "import org.apache.nifi.logging.ComponentLog\n"
                     + "import org.apache.nifi.script.*\n"
                     + "import org.apache.nifi.record.sink.*\n"
-                    + "import org.apache.nifi.lookup.*\n";
+                    + "import org.apache.nifi.lookup.*\n\n\n"
+                    + "val session = bindings[\"session\"] as org.apache.nifi.processor.ProcessSession\n"
+                    + "val REL_SUCCESS = bindings[\"REL_SUCCESS\"] as org.apache.nifi.processor.Relationship\n"
+                    + "val REL_FAILURE = bindings[\"REL_FAILURE\"] as org.apache.nifi.processor.Relationship";
+
 
     public KotlinScriptRunner(ScriptEngine engine, String scriptBody, String[] modulePaths) throws ScriptException {
-        super(engine, scriptBody, modulePaths);
-        String combined = PRELOADS + scriptBody;
-        compiledScript = ((Compilable) engine).compile(combined);
+        super(engine, scriptBody, PRELOADS, modulePaths);
+        compiledScript = ((Compilable) engine).compile(this.scriptBody);
     }
 
     @Override
