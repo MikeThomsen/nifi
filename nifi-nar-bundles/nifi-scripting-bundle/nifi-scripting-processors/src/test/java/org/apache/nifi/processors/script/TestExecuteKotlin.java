@@ -28,6 +28,8 @@ import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
+
 @Tag("kotlin")
 public class TestExecuteKotlin extends BaseScriptTest {
 
@@ -58,4 +60,25 @@ public class TestExecuteKotlin extends BaseScriptTest {
         result.get(0).assertAttributeEquals("from-content", "test content");
     }
 
+    @Test
+    @EnabledIfSystemProperty(named = "enable.kotlin.support", matches = "true")
+    public void testBenchmark() {
+        final TestRunner runner = TestRunners.newTestRunner(new ExecuteScript());
+        runner.setValidateExpressionUsage(false);
+        runner.setProperty(scriptingComponent.getScriptingComponentHelper().SCRIPT_ENGINE, "kotlin");
+        runner.setProperty(ScriptingComponentUtils.SCRIPT_FILE, "src/test/resources/kotlin/test_onTrigger.kts");
+        runner.setProperty(ScriptingComponentUtils.MODULES, "src/test/resources/kotlin");
+
+        runner.assertValid();
+        final int LIMIT = 10000;
+        for (int x = 0; x < LIMIT; x++) {
+            runner.enqueue("test content".getBytes(StandardCharsets.UTF_8));
+        }
+        runner.run(LIMIT);
+
+        runner.assertAllFlowFilesTransferred(ExecuteScript.REL_SUCCESS, LIMIT);
+        final List<MockFlowFile> result = runner.getFlowFilesForRelationship(ExecuteScript.REL_SUCCESS);
+        assertEquals(LIMIT, result.size());
+        result.get(0).assertAttributeEquals("from-content", "test content");
+    }
 }
