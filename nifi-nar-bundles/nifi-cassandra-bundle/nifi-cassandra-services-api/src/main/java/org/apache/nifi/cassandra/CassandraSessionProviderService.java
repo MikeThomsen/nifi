@@ -27,7 +27,7 @@ import org.apache.nifi.expression.ExpressionLanguageScope;
 import org.apache.nifi.processor.util.StandardValidators;
 import org.apache.nifi.ssl.SSLContextService;
 
-interface CassandraSessionProviderService extends ControllerService {
+public interface CassandraSessionProviderService extends ControllerService {
     /**
      * Obtains a Cassandra session instance
      * @return {@link Session}

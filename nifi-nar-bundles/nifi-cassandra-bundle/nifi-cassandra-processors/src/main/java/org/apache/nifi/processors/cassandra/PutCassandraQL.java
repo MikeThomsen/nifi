@@ -280,12 +280,7 @@ public class PutCassandraQL extends AbstractCassandraProcessor {
     private String getCQL(final ProcessSession session, final FlowFile flowFile, final Charset charset) {
         // Read the CQL from the FlowFile's content
         final byte[] buffer = new byte[(int) flowFile.getSize()];
-        session.read(flowFile, new InputStreamCallback() {
-            @Override
-            public void process(final InputStream in) throws IOException {
-                StreamUtils.fillBuffer(in, buffer);
-            }
-        });
+        session.read(flowFile, in -> StreamUtils.fillBuffer(in, buffer));
 
         // Create the PreparedStatement string to use for this FlowFile.
         return new String(buffer, charset);

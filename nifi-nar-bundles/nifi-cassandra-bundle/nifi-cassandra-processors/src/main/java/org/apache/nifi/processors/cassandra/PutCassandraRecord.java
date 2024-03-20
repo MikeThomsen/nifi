@@ -32,6 +32,7 @@ import org.apache.nifi.annotation.documentation.CapabilityDescription;
 import org.apache.nifi.annotation.documentation.Tags;
 import org.apache.nifi.annotation.lifecycle.OnShutdown;
 import org.apache.nifi.annotation.lifecycle.OnUnscheduled;
+import org.apache.nifi.cassandra.CassandraSessionProviderService;
 import org.apache.nifi.components.AllowableValue;
 import org.apache.nifi.components.PropertyDescriptor;
 import org.apache.nifi.components.ValidationContext;
@@ -182,9 +183,15 @@ public class PutCassandraRecord extends AbstractCassandraProcessor {
             .required(false)
             .build();
 
+    static final PropertyDescriptor CONSISTENCY_LEVEL_OVERRIDE = new PropertyDescriptor.Builder()
+            .fromPropertyDescriptor(CassandraSessionProviderService.CONSISTENCY_LEVEL)
+            .allowableValues(ConsistencyLevel.SERIAL.name(), ConsistencyLevel.LOCAL_SERIAL.name())
+            .defaultValue(ConsistencyLevel.SERIAL.name())
+            .build();
+
     private final static List<PropertyDescriptor> propertyDescriptors = Collections.unmodifiableList(Arrays.asList(
             CONNECTION_PROVIDER_SERVICE, TABLE, STATEMENT_TYPE, UPDATE_KEYS, UPDATE_METHOD,
-            RECORD_READER_FACTORY, BATCH_SIZE, BATCH_STATEMENT_TYPE));
+            RECORD_READER_FACTORY, BATCH_SIZE, CONSISTENCY_LEVEL_OVERRIDE, BATCH_STATEMENT_TYPE));
 
     private final static Set<Relationship> relationships = Collections.unmodifiableSet(
             new HashSet<>(Arrays.asList(REL_SUCCESS, REL_FAILURE)));
@@ -210,6 +217,7 @@ public class PutCassandraRecord extends AbstractCassandraProcessor {
         final String cassandraTable = context.getProperty(TABLE).evaluateAttributeExpressions(inputFlowFile).getValue();
         final RecordReaderFactory recordParserFactory = context.getProperty(RECORD_READER_FACTORY).asControllerService(RecordReaderFactory.class);
         final int batchSize = context.getProperty(BATCH_SIZE).evaluateAttributeExpressions().asInteger();
+        final String serialConsistencyLevel = context.getProperty(CONSISTENCY_LEVEL_OVERRIDE).getValue();
         final String updateKeys = context.getProperty(UPDATE_KEYS).evaluateAttributeExpressions(inputFlowFile).getValue();
 
         // Get the statement type from the attribute if necessary

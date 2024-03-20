@@ -62,10 +62,8 @@ public class PutCassandraRecordIT {
 
         InetSocketAddress contactPoint = CASSANDRA_CONTAINER.getContactPoint();
         testRunner.setProperty(PutCassandraRecord.RECORD_READER_FACTORY, "reader");
-        testRunner.setProperty(PutCassandraRecord.CONTACT_POINTS, contactPoint.getHostString() + ":" + contactPoint.getPort());
-        testRunner.setProperty(PutCassandraRecord.KEYSPACE, KEYSPACE);
         testRunner.setProperty(PutCassandraRecord.TABLE, TABLE);
-        testRunner.setProperty(PutCassandraRecord.CONSISTENCY_LEVEL, "SERIAL");
+        testRunner.setProperty(PutCassandraRecord.CONSISTENCY_LEVEL_OVERRIDE, "SERIAL");
         testRunner.setProperty(PutCassandraRecord.BATCH_STATEMENT_TYPE, "LOGGED");
         testRunner.addControllerService("reader", recordReader);
         testRunner.enableControllerService(recordReader);
