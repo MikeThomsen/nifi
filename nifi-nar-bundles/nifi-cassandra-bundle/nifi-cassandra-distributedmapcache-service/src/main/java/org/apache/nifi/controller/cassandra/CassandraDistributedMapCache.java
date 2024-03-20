@@ -17,11 +17,11 @@
 
 package org.apache.nifi.controller.cassandra;
 
-import com.datastax.driver.core.BoundStatement;
-import com.datastax.driver.core.PreparedStatement;
-import com.datastax.driver.core.ResultSet;
-import com.datastax.driver.core.Row;
-import com.datastax.driver.core.Session;
+import com.datastax.oss.driver.api.core.CqlSession;
+import com.datastax.oss.driver.api.core.cql.BoundStatement;
+import com.datastax.oss.driver.api.core.cql.PreparedStatement;
+import com.datastax.oss.driver.api.core.cql.ResultSet;
+import com.datastax.oss.driver.api.core.cql.Row;
 import org.apache.nifi.annotation.documentation.CapabilityDescription;
 import org.apache.nifi.annotation.documentation.Tags;
 import org.apache.nifi.annotation.lifecycle.OnDisabled;
@@ -108,7 +108,7 @@ public class CassandraDistributedMapCache extends AbstractControllerService impl
     private String valueField;
     private Long ttl;
 
-    private Session session;
+    private CqlSession session;
     private PreparedStatement deleteStatement;
     private PreparedStatement existsStatement;
     private PreparedStatement fetchStatement;
@@ -170,7 +170,7 @@ public class CassandraDistributedMapCache extends AbstractControllerService impl
 
         BoundStatement statement = existsStatement.bind();
         ByteBuffer buffer = ByteBuffer.wrap(key);
-        statement.setBytes(0, buffer);
+        statement.setByteBuffer(0, buffer);
         ResultSet rs =session.execute(statement);
         Iterator<Row> iterator = rs.iterator();
 
@@ -185,16 +185,16 @@ public class CassandraDistributedMapCache extends AbstractControllerService impl
 
     @Override
     public <K, V> void put(K k, V v, Serializer<K> keySerializer, Serializer<V> valueSerializer) throws IOException {
-        BoundStatement statement = insertStatement.bind();
-        statement.setBytes(0, ByteBuffer.wrap(serializeKey(k, keySerializer)));
-        statement.setBytes(1, ByteBuffer.wrap(serializeValue(v, valueSerializer)));
+        BoundStatement statement = insertStatement.bind()
+                .setByteBuffer(0, ByteBuffer.wrap(serializeKey(k, keySerializer)))
+                .setByteBuffer(1, ByteBuffer.wrap(serializeValue(v, valueSerializer)));
         session.execute(statement);
     }
 
     @Override
     public <K, V> V get(K k, Serializer<K> serializer, Deserializer<V> deserializer) throws IOException {
         BoundStatement boundStatement = fetchStatement.bind();
-        boundStatement.setBytes(0, ByteBuffer.wrap(serializeKey(k, serializer)));
+        boundStatement.setByteBuffer(0, ByteBuffer.wrap(serializeKey(k, serializer)));
         ResultSet rs = session.execute(boundStatement);
         Iterator<Row> iterator = rs.iterator();
         if (!iterator.hasNext()) {
@@ -202,7 +202,7 @@ public class CassandraDistributedMapCache extends AbstractControllerService impl
         }
 
         Row fetched = iterator.next();
-        ByteBuffer buffer = fetched.getBytes(valueField);
+        ByteBuffer buffer = fetched.getByteBuffer(valueField);
 
         byte[] content = buffer.array();
 
