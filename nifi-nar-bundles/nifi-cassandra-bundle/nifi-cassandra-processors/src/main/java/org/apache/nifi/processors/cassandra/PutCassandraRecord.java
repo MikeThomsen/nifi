@@ -182,15 +182,9 @@ public class PutCassandraRecord extends AbstractCassandraProcessor {
             .required(false)
             .build();
 
-    static final PropertyDescriptor CONSISTENCY_LEVEL = new PropertyDescriptor.Builder()
-            .fromPropertyDescriptor(AbstractCassandraProcessor.CONSISTENCY_LEVEL)
-            .allowableValues(ConsistencyLevel.SERIAL.name(), ConsistencyLevel.LOCAL_SERIAL.name())
-            .defaultValue(ConsistencyLevel.SERIAL.name())
-            .build();
-
     private final static List<PropertyDescriptor> propertyDescriptors = Collections.unmodifiableList(Arrays.asList(
-            CONNECTION_PROVIDER_SERVICE, CONTACT_POINTS, KEYSPACE, TABLE, STATEMENT_TYPE, UPDATE_KEYS, UPDATE_METHOD, CLIENT_AUTH, USERNAME, PASSWORD,
-            RECORD_READER_FACTORY, BATCH_SIZE, CONSISTENCY_LEVEL, BATCH_STATEMENT_TYPE, PROP_SSL_CONTEXT_SERVICE));
+            CONNECTION_PROVIDER_SERVICE, TABLE, STATEMENT_TYPE, UPDATE_KEYS, UPDATE_METHOD,
+            RECORD_READER_FACTORY, BATCH_SIZE, BATCH_STATEMENT_TYPE));
 
     private final static Set<Relationship> relationships = Collections.unmodifiableSet(
             new HashSet<>(Arrays.asList(REL_SUCCESS, REL_FAILURE)));
@@ -216,7 +210,6 @@ public class PutCassandraRecord extends AbstractCassandraProcessor {
         final String cassandraTable = context.getProperty(TABLE).evaluateAttributeExpressions(inputFlowFile).getValue();
         final RecordReaderFactory recordParserFactory = context.getProperty(RECORD_READER_FACTORY).asControllerService(RecordReaderFactory.class);
         final int batchSize = context.getProperty(BATCH_SIZE).evaluateAttributeExpressions().asInteger();
-        final String serialConsistencyLevel = context.getProperty(CONSISTENCY_LEVEL).getValue();
         final String updateKeys = context.getProperty(UPDATE_KEYS).evaluateAttributeExpressions(inputFlowFile).getValue();
 
         // Get the statement type from the attribute if necessary

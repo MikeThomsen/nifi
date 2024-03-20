@@ -118,7 +118,7 @@ public abstract class AbstractCassandraProcessor extends AbstractProcessor {
         cluster.set(sessionProvider.getCluster());
         cassandraSession.set(sessionProvider.getCassandraSession());
     }
-    
+
     protected void registerAdditionalCodecs() {
         // Conversion between a String[] and a list of varchar
         CodecRegistry.DEFAULT_INSTANCE.register(new ObjectArrayCodec<>(

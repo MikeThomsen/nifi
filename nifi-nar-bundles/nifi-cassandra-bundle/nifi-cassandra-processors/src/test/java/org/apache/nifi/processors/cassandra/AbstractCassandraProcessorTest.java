@@ -63,47 +63,20 @@ public class AbstractCassandraProcessorTest {
     private TestRunner testRunner;
 
     @BeforeEach
-    public void setUp() throws Exception {
+    public void setUp() {
         processor = new MockAbstractCassandraProcessor();
         testRunner = TestRunners.newTestRunner(processor);
     }
 
     @Test
-    public void testCustomValidate() throws Exception {
-        testRunner.setProperty(AbstractCassandraProcessor.CONTACT_POINTS, "");
-        testRunner.assertNotValid();
-        testRunner.setProperty(AbstractCassandraProcessor.CONTACT_POINTS, "localhost");
-        testRunner.assertNotValid();
-        testRunner.setProperty(AbstractCassandraProcessor.CONTACT_POINTS, "localhost:9042");
-        testRunner.assertValid();
-        testRunner.setProperty(AbstractCassandraProcessor.CONTACT_POINTS, "localhost:9042, node2: 4399");
-        testRunner.assertValid();
-        testRunner.setProperty(AbstractCassandraProcessor.CONTACT_POINTS, " localhost : 9042, node2: 4399");
-        testRunner.assertValid();
-        testRunner.setProperty(AbstractCassandraProcessor.CONTACT_POINTS, "localhost:9042, node2");
-        testRunner.assertNotValid();
-        testRunner.setProperty(AbstractCassandraProcessor.CONTACT_POINTS, "localhost:65536");
-        testRunner.assertNotValid();
-        testRunner.setProperty(AbstractCassandraProcessor.CONTACT_POINTS, "localhost:9042");
-        testRunner.setProperty(AbstractCassandraProcessor.USERNAME, "user");
-        testRunner.assertNotValid(); // Needs a password set if user is set
-        testRunner.setProperty(AbstractCassandraProcessor.PASSWORD, "password");
-        testRunner.assertValid();
-    }
-
-    @Test
-    public void testCustomValidateEL() throws Exception {
-        testRunner.setProperty(AbstractCassandraProcessor.CONTACT_POINTS, "${host}");
-        testRunner.setProperty(AbstractCassandraProcessor.KEYSPACE, "${keyspace}");
-        testRunner.setProperty(AbstractCassandraProcessor.USERNAME, "${user}");
-        testRunner.setProperty(AbstractCassandraProcessor.PASSWORD, "${password}");
+    public void testCustomValidateEL() {
         testRunner.setProperty(AbstractCassandraProcessor.CHARSET, "${charset}");
         testRunner.assertValid();
     }
 
     @SuppressWarnings("unchecked")
     @Test
-    public void testGetCassandraObject() throws Exception {
+    public void testGetCassandraObject() {
         Row row = CassandraQueryTestUtil.createRow("user1", "Joe", "Smith",
                 Sets.newHashSet("jsmith@notareal.com", "joes@fakedomain.com"), Arrays.asList("New York, NY", "Santa Clara, CA"),
                 new HashMap<Date, String>() {{
@@ -128,7 +101,7 @@ public class AbstractCassandraProcessorTest {
     }
 
     @Test
-    public void testGetSchemaForType() throws Exception {
+    public void testGetSchemaForType() {
         assertEquals(AbstractCassandraProcessor.getSchemaForType("string").getType().getName(), "string");
         assertEquals(AbstractCassandraProcessor.getSchemaForType("boolean").getType().getName(), "boolean");
         assertEquals(AbstractCassandraProcessor.getSchemaForType("int").getType().getName(), "int");
@@ -139,12 +112,12 @@ public class AbstractCassandraProcessorTest {
     }
 
     @Test
-    public void testGetSchemaForTypeBadType() throws Exception {
+    public void testGetSchemaForTypeBadType() {
         assertThrows(IllegalArgumentException.class, () -> AbstractCassandraProcessor.getSchemaForType("nothing"));
     }
 
     @Test
-    public void testGetPrimitiveAvroTypeFromCassandraType() throws Exception {
+    public void testGetPrimitiveAvroTypeFromCassandraType() {
         assertEquals("string", AbstractCassandraProcessor.getPrimitiveAvroTypeFromCassandraType(DataType.ascii()));
         assertEquals("string", AbstractCassandraProcessor.getPrimitiveAvroTypeFromCassandraType(DataType.text()));
         assertEquals("string", AbstractCassandraProcessor.getPrimitiveAvroTypeFromCassandraType(DataType.varchar()));
@@ -167,7 +140,7 @@ public class AbstractCassandraProcessorTest {
     }
 
     @Test
-    public void testGetPrimitiveAvroTypeFromCassandraTypeBadType() throws Exception {
+    public void testGetPrimitiveAvroTypeFromCassandraTypeBadType() {
         DataType mockDataType = mock(DataType.class);
         assertThrows(IllegalArgumentException.class, () -> AbstractCassandraProcessor.getPrimitiveAvroTypeFromCassandraType(mockDataType));
     }
@@ -178,7 +151,7 @@ public class AbstractCassandraProcessorTest {
     }
 
     @Test
-    public void testGetContactPoints() throws Exception {
+    public void testGetContactPoints() {
         List<InetSocketAddress> contactPoints = processor.getContactPoints("");
         assertNotNull(contactPoints);
         assertEquals(1, contactPoints.size());
@@ -201,49 +174,6 @@ public class AbstractCassandraProcessorTest {
     }
 
     @Test
-    public void testConnectToCassandra() throws Exception {
-        // Follow the non-null path
-        Cluster cluster = mock(Cluster.class);
-        processor.setCluster(cluster);
-        testRunner.setProperty(AbstractCassandraProcessor.CONSISTENCY_LEVEL, "ONE");
-        processor.connectToCassandra(testRunner.getProcessContext());
-        processor.stop(testRunner.getProcessContext());
-        assertNull(processor.getCluster());
-
-        // Now do a connect where a cluster is "built"
-        processor.connectToCassandra(testRunner.getProcessContext());
-        assertEquals("cluster1", processor.getCluster().getMetadata().getClusterName());
-    }
-
-    @Test
-    public void testConnectToCassandraWithSSL() throws Exception {
-        SSLContextService sslService = mock(SSLContextService.class);
-        when(sslService.getIdentifier()).thenReturn("ssl-context");
-        testRunner.addControllerService("ssl-context", sslService);
-        testRunner.enableControllerService(sslService);
-        testRunner.setProperty(AbstractCassandraProcessor.PROP_SSL_CONTEXT_SERVICE, "ssl-context");
-        testRunner.setProperty(AbstractCassandraProcessor.CONSISTENCY_LEVEL, "ONE");
-        testRunner.assertValid(sslService);
-        processor.connectToCassandra(testRunner.getProcessContext());
-        assertNotNull(processor.getCluster());
-        processor.setCluster(null);
-        // Try with a ClientAuth value
-        testRunner.setProperty(AbstractCassandraProcessor.CLIENT_AUTH, "WANT");
-        processor.connectToCassandra(testRunner.getProcessContext());
-        assertNotNull(processor.getCluster());
-    }
-
-    @Test
-    public void testConnectToCassandraUsernamePassword() throws Exception {
-        testRunner.setProperty(AbstractCassandraProcessor.USERNAME, "user");
-        testRunner.setProperty(AbstractCassandraProcessor.PASSWORD, "password");
-        testRunner.setProperty(AbstractCassandraProcessor.CONSISTENCY_LEVEL, "ONE");
-        // Now do a connect where a cluster is "built"
-        processor.connectToCassandra(testRunner.getProcessContext());
-        assertNotNull(processor.getCluster());
-    }
-
-    @Test
     public void testCustomValidateCassandraConnectionConfiguration() throws InitializationException {
         MockCassandraSessionProvider sessionProviderService = new MockCassandraSessionProvider();
 
@@ -252,21 +182,9 @@ public class AbstractCassandraProcessorTest {
         testRunner.setProperty(sessionProviderService, CassandraSessionProvider.KEYSPACE, "somekyespace");
 
         testRunner.setProperty(AbstractCassandraProcessor.CONNECTION_PROVIDER_SERVICE, "cassandra-connection-provider");
-        testRunner.setProperty(AbstractCassandraProcessor.CONTACT_POINTS, "localhost:9042");
-        testRunner.setProperty(AbstractCassandraProcessor.KEYSPACE, "some-keyspace");
-        testRunner.setProperty(AbstractCassandraProcessor.CONSISTENCY_LEVEL, "ONE");
-        testRunner.setProperty(AbstractCassandraProcessor.USERNAME, "user");
-        testRunner.setProperty(AbstractCassandraProcessor.PASSWORD, "password");
         testRunner.enableControllerService(sessionProviderService);
 
         testRunner.assertNotValid();
-
-        testRunner.removeProperty(AbstractCassandraProcessor.CONTACT_POINTS);
-        testRunner.removeProperty(AbstractCassandraProcessor.KEYSPACE);
-        testRunner.removeProperty(AbstractCassandraProcessor.CONSISTENCY_LEVEL);
-        testRunner.removeProperty(AbstractCassandraProcessor.USERNAME);
-        testRunner.removeProperty(AbstractCassandraProcessor.PASSWORD);
-
         testRunner.assertValid();
     }
 
@@ -277,7 +195,7 @@ public class AbstractCassandraProcessorTest {
 
         @Override
         protected List<PropertyDescriptor> getSupportedPropertyDescriptors() {
-            return Arrays.asList(CONNECTION_PROVIDER_SERVICE, CONTACT_POINTS, KEYSPACE, USERNAME, PASSWORD, CONSISTENCY_LEVEL, CHARSET);
+            return Arrays.asList(CONNECTION_PROVIDER_SERVICE, CHARSET);
         }
 
         @Override
