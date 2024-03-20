@@ -16,10 +16,7 @@
  */
 package org.apache.nifi.cassandra;
 
-import com.datastax.driver.core.Cluster;
-import com.datastax.driver.core.ConsistencyLevel;
-import com.datastax.driver.core.ProtocolOptions;
-import com.datastax.driver.core.Session;
+import com.datastax.oss.driver.api.core.CqlSession;
 import io.netty.handler.ssl.ClientAuth;
 import org.apache.nifi.components.PropertyDescriptor;
 import org.apache.nifi.controller.ControllerService;
@@ -30,15 +27,9 @@ import org.apache.nifi.ssl.SSLContextService;
 public interface CassandraSessionProviderService extends ControllerService {
     /**
      * Obtains a Cassandra session instance
-     * @return {@link Session}
+     * @return {@link CqlSession}
      */
-    Session getCassandraSession();
-
-    /**
-     * Obtains a Cassandra cluster instance
-     * @return {@link Cluster}
-     */
-    Cluster getCluster();
+    CqlSession getCassandraSession();
 
     PropertyDescriptor CONTACT_POINTS = new PropertyDescriptor.Builder()
             .name("Cassandra Contact Points")
@@ -96,22 +87,22 @@ public interface CassandraSessionProviderService extends ControllerService {
             .addValidator(StandardValidators.NON_EMPTY_VALIDATOR)
             .build();
 
-    PropertyDescriptor CONSISTENCY_LEVEL = new PropertyDescriptor.Builder()
-            .name("Consistency Level")
-            .description("The strategy for how many replicas must respond before results are returned.")
-            .required(true)
-            .allowableValues(ConsistencyLevel.values())
-            .defaultValue("ONE")
-            .build();
-
-    PropertyDescriptor COMPRESSION_TYPE = new PropertyDescriptor.Builder()
-            .name("Compression Type")
-            .description("Enable compression at transport-level requests and responses")
-            .required(false)
-            .allowableValues(ProtocolOptions.Compression.values())
-            .addValidator(StandardValidators.NON_EMPTY_VALIDATOR)
-            .defaultValue("NONE")
-            .build();
+//    PropertyDescriptor CONSISTENCY_LEVEL = new PropertyDescriptor.Builder()
+//            .name("Consistency Level")
+//            .description("The strategy for how many replicas must respond before results are returned.")
+//            .required(true)
+//            .allowableValues(ConsistencyLevel.values())
+//            .defaultValue("ONE")
+//            .build();
+//
+//    PropertyDescriptor COMPRESSION_TYPE = new PropertyDescriptor.Builder()
+//            .name("Compression Type")
+//            .description("Enable compression at transport-level requests and responses")
+//            .required(false)
+//            .allowableValues(ProtocolOptions.Compression.values())
+//            .addValidator(StandardValidators.NON_EMPTY_VALIDATOR)
+//            .defaultValue("NONE")
+//            .build();
 
     PropertyDescriptor READ_TIMEOUT_MS = new PropertyDescriptor.Builder()
             .name("read-timeout-ms")

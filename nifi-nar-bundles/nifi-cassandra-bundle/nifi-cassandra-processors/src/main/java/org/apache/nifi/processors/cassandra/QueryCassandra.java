@@ -16,15 +16,11 @@
  */
 package org.apache.nifi.processors.cassandra;
 
-import com.datastax.driver.core.ColumnDefinitions;
-import com.datastax.driver.core.DataType;
-import com.datastax.driver.core.ResultSet;
-import com.datastax.driver.core.Row;
-import com.datastax.driver.core.Session;
-import com.datastax.driver.core.exceptions.NoHostAvailableException;
-import com.datastax.driver.core.exceptions.QueryExecutionException;
-import com.datastax.driver.core.exceptions.QueryValidationException;
-import com.google.common.annotations.VisibleForTesting;
+import com.datastax.oss.driver.api.core.CqlSession;
+import com.datastax.oss.driver.api.core.cql.ColumnDefinitions;
+import com.datastax.oss.driver.api.core.cql.ResultSet;
+import com.datastax.oss.driver.api.core.cql.Row;
+import com.datastax.oss.driver.api.core.type.DataType;
 import org.apache.avro.Schema;
 import org.apache.avro.SchemaBuilder;
 import org.apache.avro.file.DataFileWriter;
@@ -270,7 +266,7 @@ public class QueryCassandra extends AbstractCassandraProcessor {
         try {
             // The documentation for the driver recommends the session remain open the entire time the processor is running
             // and states that it is thread-safe. This is why connectionSession is not in a try-with-resources.
-            final Session connectionSession = cassandraSession.get();
+            final CqlSession connectionSession = cassandraSession.get();
             final ResultSet resultSet;
 
             if (queryTimeout > 0) {
@@ -506,7 +502,7 @@ public class QueryCassandra extends AbstractCassandraProcessor {
                     }
 
                     for (int i = 0; i < columnDefinitions.size(); i++) {
-                        final DataType dataType = columnDefinitions.getType(i);
+                        final DataType dataType = columnDefinitions.get(i).getType();
 
                         if (row.isNull(i)) {
                             rec.put(i, null);
@@ -689,7 +685,7 @@ public class QueryCassandra extends AbstractCassandraProcessor {
         final int nrOfColumns = (columnDefinitions == null ? 0 : columnDefinitions.size());
         String tableName = "NiFi_Cassandra_Query_Record";
         if (nrOfColumns > 0) {
-            String tableNameFromMeta = columnDefinitions.getTable(0);
+            String tableNameFromMeta = columnDefinitions.get(0).getTable().toString(); //.getTable(0);
             if (!StringUtils.isBlank(tableNameFromMeta)) {
                 tableName = tableNameFromMeta;
             }
@@ -699,7 +695,7 @@ public class QueryCassandra extends AbstractCassandraProcessor {
         if (columnDefinitions != null) {
             for (int i = 0; i < nrOfColumns; i++) {
 
-                DataType dataType = columnDefinitions.getType(i);
+                DataType dataType = columnDefinitions.get(i).getType();
                 if (dataType == null) {
                     throw new IllegalArgumentException("No data type for column[" + i + "] with name " + columnDefinitions.getName(i));
                 }

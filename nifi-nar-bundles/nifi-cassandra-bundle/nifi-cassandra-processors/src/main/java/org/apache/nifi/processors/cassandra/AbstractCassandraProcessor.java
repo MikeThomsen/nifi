@@ -16,46 +16,37 @@
  */
 package org.apache.nifi.processors.cassandra;
 
-import com.datastax.driver.core.Cluster;
-import com.datastax.driver.core.CodecRegistry;
-import com.datastax.driver.core.ConsistencyLevel;
-import com.datastax.driver.core.DataType;
-import com.datastax.driver.core.Metadata;
-import com.datastax.driver.core.ProtocolOptions;
-import com.datastax.driver.core.RemoteEndpointAwareJdkSSLOptions;
-import com.datastax.driver.core.Row;
-import com.datastax.driver.core.SSLOptions;
-import com.datastax.driver.core.Session;
-import com.datastax.driver.core.TypeCodec;
-import com.datastax.driver.core.exceptions.AuthenticationException;
-import com.datastax.driver.core.exceptions.NoHostAvailableException;
-import com.datastax.driver.extras.codecs.arrays.ObjectArrayCodec;
+import com.datastax.oss.driver.api.core.CqlSession;
+import com.datastax.oss.driver.api.core.type.ContainerType;
+import com.datastax.oss.driver.api.core.type.MapType;
+import com.datastax.oss.driver.api.core.type.TupleType;
+import com.datastax.oss.driver.api.core.type.codec.TypeCodec;
+import com.datastax.oss.driver.api.core.type.codec.TypeCodecs;
+import com.datastax.oss.driver.api.core.type.codec.registry.CodecRegistry;
+import com.datastax.oss.driver.api.core.type.DataType;
+import com.datastax.oss.driver.api.core.type.DataTypes;
+import com.datastax.oss.driver.api.core.cql.Row;
+import com.datastax.oss.driver.internal.core.type.codec.registry.DefaultCodecRegistry;
+import org.apache.avro.Schema;
+import org.apache.avro.SchemaBuilder;
+import org.apache.nifi.annotation.lifecycle.OnScheduled;
+import org.apache.nifi.cassandra.CassandraSessionProviderService;
+import org.apache.nifi.components.PropertyDescriptor;
+import org.apache.nifi.expression.ExpressionLanguageScope;
+import org.apache.nifi.processor.AbstractProcessor;
+import org.apache.nifi.processor.ProcessContext;
+import org.apache.nifi.processor.Relationship;
+import org.apache.nifi.processor.util.StandardValidators;
+
 import java.net.InetSocketAddress;
 import java.util.ArrayList;
-import java.util.Collection;
+import java.util.Arrays;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicReference;
-import javax.net.ssl.SSLContext;
-import org.apache.avro.Schema;
-import org.apache.avro.SchemaBuilder;
-import org.apache.commons.lang3.StringUtils;
-import org.apache.nifi.annotation.lifecycle.OnScheduled;
-import org.apache.nifi.cassandra.CassandraSessionProviderService;
-import org.apache.nifi.components.PropertyDescriptor;
-import org.apache.nifi.components.PropertyValue;
-import org.apache.nifi.components.ValidationContext;
-import org.apache.nifi.components.ValidationResult;
-import org.apache.nifi.expression.ExpressionLanguageScope;
-import org.apache.nifi.logging.ComponentLog;
-import org.apache.nifi.processor.AbstractProcessor;
-import org.apache.nifi.processor.ProcessContext;
-import org.apache.nifi.processor.Relationship;
-import org.apache.nifi.processor.exception.ProcessException;
-import org.apache.nifi.processor.util.StandardValidators;
-import org.apache.nifi.security.util.ClientAuth;
-import org.apache.nifi.ssl.SSLContextService;
+
+import static com.datastax.oss.driver.api.core.type.DataTypes.*;
 
 /**
  * AbstractCassandraProcessor is a base class for Cassandra processors and contains logic and variables common to most
@@ -105,26 +96,24 @@ public abstract class AbstractCassandraProcessor extends AbstractProcessor {
         descriptors.add(CHARSET);
     }
 
-    protected final AtomicReference<Cluster> cluster = new AtomicReference<>(null);
-    protected final AtomicReference<Session> cassandraSession = new AtomicReference<>(null);
+    protected final AtomicReference<CqlSession> cassandraSession = new AtomicReference<>(null);
 
-    protected static final CodecRegistry codecRegistry = new CodecRegistry();
+    protected static final DefaultCodecRegistry codecRegistry = new DefaultCodecRegistry("nifi");
 
     @OnScheduled
     public void onScheduled(ProcessContext context) {
         registerAdditionalCodecs();
 
         CassandraSessionProviderService sessionProvider = context.getProperty(CONNECTION_PROVIDER_SERVICE).asControllerService(CassandraSessionProviderService.class);
-        cluster.set(sessionProvider.getCluster());
         cassandraSession.set(sessionProvider.getCassandraSession());
     }
 
     protected void registerAdditionalCodecs() {
         // Conversion between a String[] and a list of varchar
-        CodecRegistry.DEFAULT_INSTANCE.register(new ObjectArrayCodec<>(
-                DataType.list(DataType.varchar()),
+        codecRegistry.register(new ObjectArrayCodec<>(
+                DataTypes.listOf(TEXT),
                 String[].class,
-                TypeCodec.varchar()));
+                TypeCodecs.TEXT));
     }
 
     public void stop(ProcessContext context) {
@@ -137,72 +126,70 @@ public abstract class AbstractCassandraProcessor extends AbstractProcessor {
                 cassandraSession.get().close();
                 cassandraSession.set(null);
             }
-            if (cluster.get() != null) {
-                cluster.get().close();
-                cluster.set(null);
-            }
         }
     }
 
 
     protected static Object getCassandraObject(Row row, int i, DataType dataType) {
-        if (dataType.equals(DataType.blob())) {
-            return row.getBytes(i);
+        if (dataType.equals(DataTypes.BLOB)) {
+            return row.getByteBuffer(i).array();
 
-        } else if (dataType.equals(DataType.varint()) || dataType.equals(DataType.decimal())) {
+        } else if (dataType.equals(DataTypes.VARINT) || dataType.equals(DataTypes.DECIMAL)) {
             // Avro can't handle BigDecimal and BigInteger as numbers - it will throw an
             // AvroRuntimeException such as: "Unknown datum type: java.math.BigDecimal: 38"
             return row.getObject(i).toString();
 
-        } else if (dataType.equals(DataType.cboolean())) {
+        } else if (dataType.equals(DataTypes.BOOLEAN)) {
             return row.getBool(i);
 
-        } else if (dataType.equals(DataType.cint())) {
+        } else if (dataType.equals(DataTypes.INT)) {
             return row.getInt(i);
 
-        } else if (dataType.equals(DataType.bigint())
-                || dataType.equals(DataType.counter())) {
+        } else if (dataType.equals(DataTypes.BIGINT)
+                || dataType.equals(DataTypes.COUNTER)) {
             return row.getLong(i);
 
-        } else if (dataType.equals(DataType.ascii())
-                || dataType.equals(DataType.text())
-                || dataType.equals(DataType.varchar())) {
+        } else if (dataType.equals(ASCII)
+                || dataType.equals(DataTypes.TEXT)) {
             return row.getString(i);
 
-        } else if (dataType.equals(DataType.cfloat())) {
+        } else if (dataType.equals(DataTypes.FLOAT)) {
             return row.getFloat(i);
 
-        } else if (dataType.equals(DataType.cdouble())) {
+        } else if (dataType.equals(DataTypes.DOUBLE)) {
             return row.getDouble(i);
 
-        } else if (dataType.equals(DataType.timestamp())) {
-            return row.getTimestamp(i);
-        } else if (dataType.equals(DataType.date())) {
-            return row.getDate(i);
+        } else if (dataType.equals(DataTypes.TIMESTAMP)) {
+            return row.getLocalTime(i);
+        } else if (dataType.equals(DataTypes.DATE)) {
+            return row.getLocalDate(i);
 
-        } else if (dataType.equals(DataType.time())) {
-            return row.getTime(i);
+        } else if (dataType.equals(DataTypes.TIME)) {
+            return row.getLocalTime(i);
 
-        } else if (dataType.isCollection()) {
+        } else if (dataType instanceof MapType || dataType instanceof TupleType || dataType instanceof ContainerType) {
 
-            List<DataType> typeArguments = dataType.getTypeArguments();
-            if (typeArguments == null || typeArguments.size() == 0) {
-                throw new IllegalArgumentException("Column[" + i + "] " + dataType.getName()
+            List<DataType> typeArguments = switch(dataType) {
+                case MapType type -> Arrays.asList(type.getKeyType(), type.getValueType());
+                case TupleType type -> type.getComponentTypes();
+                case ContainerType type -> Arrays.asList(type.getElementType());
+                default -> throw new IllegalArgumentException("Column[" + i + "] " + dataType
                         + " is a collection but no type arguments were specified!");
-            }
+            };
+
             // Get the first type argument, to be used for lists and sets (and the first in a map)
             DataType firstArg = typeArguments.get(0);
             TypeCodec firstCodec = codecRegistry.codecFor(firstArg);
-            if (dataType.equals(DataType.set(firstArg))) {
-                return row.getSet(i, firstCodec.getJavaType());
-            } else if (dataType.equals(DataType.list(firstArg))) {
-                return row.getList(i, firstCodec.getJavaType());
+            if (dataType.equals(DataTypes.setOf(firstArg))) {
+                return row.getSet(i, firstCodec.getJavaType().getComponentType().getRawType());
+            } else if (dataType.equals(DataTypes.listOf(firstArg))) {
+                return row.getList(i, firstCodec.getJavaType().getComponentType().getRawType());
             } else {
                 // Must be an n-arg collection like map
                 DataType secondArg = typeArguments.get(1);
                 TypeCodec secondCodec = codecRegistry.codecFor(secondArg);
-                if (dataType.equals(DataType.map(firstArg, secondArg))) {
-                    return row.getMap(i, firstCodec.getJavaType(), secondCodec.getJavaType());
+                if (dataType.equals(DataTypes.mapOf(firstArg, secondArg))) {
+                    return row.getMap(i, firstCodec.getJavaType().getRawType(), secondCodec.getJavaType().getRawType());
                 }
             }
 
@@ -247,44 +234,46 @@ public abstract class AbstractCassandraProcessor extends AbstractProcessor {
 
     protected static String getPrimitiveAvroTypeFromCassandraType(final DataType dataType) {
         // Map types from Cassandra to Avro where possible
-        if (dataType.equals(DataType.ascii())
-                || dataType.equals(DataType.text())
-                || dataType.equals(DataType.varchar())
+        if (dataType.equals(ASCII)
+                || dataType.equals(DataTypes.TEXT)
                 // Nonstandard types represented by this processor as a string
-                || dataType.equals(DataType.timestamp())
-                || dataType.equals(DataType.timeuuid())
-                || dataType.equals(DataType.uuid())
-                || dataType.equals(DataType.inet())
-                || dataType.equals(DataType.varint())) {
+                || dataType.equals(DataTypes.TIMESTAMP)
+                || dataType.equals(DataTypes.TIMEUUID)
+                || dataType.equals(DataTypes.UUID)
+                || dataType.equals(DataTypes.INET)
+                || dataType.equals(DataTypes.VARINT)) {
             return "string";
 
-        } else if (dataType.equals(DataType.cboolean())) {
+        } else if (dataType.equals(DataTypes.BOOLEAN)) {
             return "boolean";
 
-        } else if (dataType.equals(DataType.cint())) {
+        } else if (dataType.equals(DataTypes.INT)) {
             return "int";
 
-        } else if (dataType.equals(DataType.bigint())
-                || dataType.equals(DataType.counter())) {
+        } else if (dataType.equals(DataTypes.BIGINT)
+                || dataType.equals(DataTypes.COUNTER)) {
             return "long";
 
-        } else if (dataType.equals(DataType.cfloat())) {
+        } else if (dataType.equals(DataTypes.FLOAT)) {
             return "float";
 
-        } else if (dataType.equals(DataType.cdouble())) {
+        } else if (dataType.equals(DataTypes.DOUBLE)) {
             return "double";
 
-        } else if (dataType.equals(DataType.blob())) {
+        } else if (dataType.equals(DataTypes.BLOB)) {
             return "bytes";
 
         } else {
-            throw new IllegalArgumentException("createSchema: Unknown Cassandra data type " + dataType.getName()
+            throw new IllegalArgumentException("createSchema: Unknown Cassandra data type " + dataType
                     + " cannot be converted to Avro type");
         }
     }
 
     protected static DataType getPrimitiveDataTypeFromString(String dataTypeName) {
-        Set<DataType> primitiveTypes = DataType.allPrimitiveTypes();
+        Set<DataType> primitiveTypes = new HashSet<>(Arrays.asList(
+           ASCII, BIGINT, BLOB, BOOLEAN, COUNTER, DECIMAL, DOUBLE, FLOAT, INT, TIMESTAMP, UUID,
+                VARINT, TIMEUUID, INET, DATE, TEXT, TIME, SMALLINT, TINYINT, DURATION
+        ));
         for (DataType primitiveType : primitiveTypes) {
             if (primitiveType.toString().equals(dataTypeName)) {
                 return primitiveType;

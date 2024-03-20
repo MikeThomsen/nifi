@@ -16,24 +16,20 @@
  */
 package org.apache.nifi.processors.cassandra;
 
-import com.datastax.driver.core.BoundStatement;
-import com.datastax.driver.core.DataType;
-import com.datastax.driver.core.PreparedStatement;
-import com.datastax.driver.core.ResultSetFuture;
-import com.datastax.driver.core.Session;
-import com.datastax.driver.core.TypeCodec;
-import com.datastax.driver.core.exceptions.InvalidTypeException;
-import com.datastax.driver.core.exceptions.NoHostAvailableException;
-import com.datastax.driver.core.exceptions.QueryExecutionException;
-import com.datastax.driver.core.exceptions.QueryValidationException;
-import com.google.common.annotations.VisibleForTesting;
-import com.google.common.cache.CacheBuilder;
-import org.apache.nifi.annotation.behavior.SystemResourceConsideration;
+import com.datastax.oss.driver.api.core.CqlSession;
+import com.datastax.oss.driver.api.core.cql.BoundStatement;
+import com.datastax.oss.driver.api.core.cql.PreparedStatement;
+import com.datastax.oss.driver.api.core.type.DataType;
+import com.datastax.oss.driver.api.core.type.DataTypes;
+import com.datastax.oss.driver.api.core.type.codec.TypeCodec;
+import com.datastax.oss.driver.shaded.guava.common.cache.CacheBuilder;
+import com.sun.jdi.InvalidTypeException;
 import org.apache.nifi.annotation.behavior.InputRequirement;
 import org.apache.nifi.annotation.behavior.ReadsAttribute;
 import org.apache.nifi.annotation.behavior.ReadsAttributes;
 import org.apache.nifi.annotation.behavior.SupportsBatching;
 import org.apache.nifi.annotation.behavior.SystemResource;
+import org.apache.nifi.annotation.behavior.SystemResourceConsideration;
 import org.apache.nifi.annotation.documentation.CapabilityDescription;
 import org.apache.nifi.annotation.documentation.Tags;
 import org.apache.nifi.annotation.lifecycle.OnScheduled;
@@ -46,15 +42,13 @@ import org.apache.nifi.processor.ProcessContext;
 import org.apache.nifi.processor.ProcessSession;
 import org.apache.nifi.processor.Relationship;
 import org.apache.nifi.processor.exception.ProcessException;
-import org.apache.nifi.processor.io.InputStreamCallback;
 import org.apache.nifi.processor.util.StandardValidators;
 import org.apache.nifi.stream.io.StreamUtils;
 import org.apache.nifi.util.StringUtils;
 
-import java.io.IOException;
-import java.io.InputStream;
 import java.nio.ByteBuffer;
 import java.nio.charset.Charset;
+import java.time.LocalTime;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Date;
@@ -185,7 +179,7 @@ public class PutCassandraQL extends AbstractCassandraProcessor {
 
         // The documentation for the driver recommends the session remain open the entire time the processor is running
         // and states that it is thread-safe. This is why connectionSession is not in a try-with-resources.
-        final Session connectionSession = cassandraSession.get();
+        final CqlSession connectionSession = cassandraSession.get();
 
         String cql = getCQL(session, flowFile, charset);
         try {
@@ -213,7 +207,7 @@ public class PutCassandraQL extends AbstractCassandraProcessor {
 
                     try {
                         setStatementObject(boundStatement, parameterIndex - 1, valueAttrName, parameterValue, paramType);
-                    } catch (final InvalidTypeException | IllegalArgumentException e) {
+                    } catch (final IllegalArgumentException e) {
                         throw new ProcessException("The value of the " + valueAttrName + " is '" + parameterValue
                                 + "', which cannot be converted into the necessary data type: " + paramType, e);
                     }
@@ -317,38 +311,37 @@ public class PutCassandraQL extends AbstractCassandraProcessor {
                     TypeCodec typeCodec = codecRegistry.codecFor(mainType);
 
                     // Need the right statement.setXYZ() method
-                    if (mainType.equals(DataType.ascii())
-                            || mainType.equals(DataType.text())
-                            || mainType.equals(DataType.varchar())
-                            || mainType.equals(DataType.inet())
-                            || mainType.equals(DataType.varint())) {
+                    if (mainType.equals(DataTypes.ASCII)
+                            || mainType.equals(DataTypes.TEXT)
+                            || mainType.equals(DataTypes.INET)
+                            || mainType.equals(DataTypes.VARINT)) {
                         // These are strings, so just use the paramValue
                         statement.setString(paramIndex, paramValue);
 
-                    } else if (mainType.equals(DataType.cboolean())) {
+                    } else if (mainType.equals(DataTypes.BOOLEAN)) {
                         statement.setBool(paramIndex, (boolean) typeCodec.parse(paramValue));
 
-                    } else if (mainType.equals(DataType.cint())) {
+                    } else if (mainType.equals(DataTypes.INT)) {
                         statement.setInt(paramIndex, (int) typeCodec.parse(paramValue));
 
-                    } else if (mainType.equals(DataType.bigint())
-                            || mainType.equals(DataType.counter())) {
+                    } else if (mainType.equals(DataTypes.BIGINT)
+                            || mainType.equals(DataTypes.COUNTER)) {
                         statement.setLong(paramIndex, (long) typeCodec.parse(paramValue));
 
-                    } else if (mainType.equals(DataType.cfloat())) {
+                    } else if (mainType.equals(DataTypes.FLOAT)) {
                         statement.setFloat(paramIndex, (float) typeCodec.parse(paramValue));
 
-                    } else if (mainType.equals(DataType.cdouble())) {
+                    } else if (mainType.equals(DataTypes.DOUBLE)) {
                         statement.setDouble(paramIndex, (double) typeCodec.parse(paramValue));
 
-                    } else if (mainType.equals(DataType.blob())) {
-                        statement.setBytes(paramIndex, (ByteBuffer) typeCodec.parse(paramValue));
+                    } else if (mainType.equals(DataTypes.BLOB)) {
+                        statement.setByteBuffer(paramIndex, (ByteBuffer) typeCodec.parse(paramValue));
 
-                    } else if (mainType.equals(DataType.timestamp())) {
-                        statement.setTimestamp(paramIndex, (Date) typeCodec.parse(paramValue));
-                    } else if (mainType.equals(DataType.timeuuid())
-                            || mainType.equals(DataType.uuid())) {
-                        statement.setUUID(paramIndex, (UUID) typeCodec.parse(paramValue));
+                    } else if (mainType.equals(DataTypes.TIMESTAMP)) {
+                        statement.setLocalTime(paramIndex, (LocalTime) typeCodec.parse(paramValue));
+                    } else if (mainType.equals(DataTypes.TIMEUUID)
+                            || mainType.equals(DataTypes.UUID)) {
+                        statement.setUuid(paramIndex, (UUID) typeCodec.parse(paramValue));
                     }
                     return;
                 } else {
