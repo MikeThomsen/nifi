@@ -48,7 +48,6 @@ public class TestCassandraSessionProvider {
 
         assertEquals(10, properties.size());
         assertTrue(properties.contains(CassandraSessionProvider.CLIENT_AUTH));
-        assertTrue(properties.contains(CassandraSessionProvider.CONSISTENCY_LEVEL));
         assertTrue(properties.contains(CassandraSessionProvider.CONTACT_POINTS));
         assertTrue(properties.contains(CassandraSessionProvider.KEYSPACE));
         assertTrue(properties.contains(CassandraSessionProvider.PASSWORD));
