@@ -16,14 +16,11 @@
  */
 package org.apache.nifi.processors.cassandra;
 
-import com.datastax.driver.core.BatchStatement;
-import com.datastax.driver.core.ConsistencyLevel;
-import com.datastax.driver.core.Session;
-import com.datastax.driver.core.Statement;
-import com.datastax.driver.core.querybuilder.Assignment;
-import com.datastax.driver.core.querybuilder.Insert;
-import com.datastax.driver.core.querybuilder.QueryBuilder;
-import com.datastax.driver.core.querybuilder.Update;
+import com.datastax.oss.driver.api.core.ConsistencyLevel;
+import com.datastax.oss.driver.api.core.CqlSession;
+import com.datastax.oss.driver.api.core.DefaultConsistencyLevel;
+import com.datastax.oss.driver.api.core.cql.BatchStatement;
+import com.datastax.oss.driver.api.core.cql.Statement;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.nifi.annotation.behavior.InputRequirement;
 import org.apache.nifi.annotation.behavior.ReadsAttribute;
@@ -246,7 +243,7 @@ public class PutCassandraRecord extends AbstractCassandraProcessor {
         }
 
         final BatchStatement batchStatement;
-        final Session connectionSession = cassandraSession.get();
+        final CqlSession connectionSession = cassandraSession.get();
         final AtomicInteger recordsAdded = new AtomicInteger(0);
         final StopWatch stopWatch = new StopWatch(true);
 
@@ -277,7 +274,7 @@ public class PutCassandraRecord extends AbstractCassandraProcessor {
             Record record;
 
             batchStatement = new BatchStatement(BatchStatement.Type.valueOf(batchStatementType));
-            batchStatement.setSerialConsistencyLevel(ConsistencyLevel.valueOf(serialConsistencyLevel));
+            batchStatement.setSerialConsistencyLevel(DefaultConsistencyLevel.valueOf(serialConsistencyLevel));
 
             while((record = reader.nextRecord()) != null) {
                 Map<String, Object> recordContentMap = (Map<String, Object>) DataTypeUtils

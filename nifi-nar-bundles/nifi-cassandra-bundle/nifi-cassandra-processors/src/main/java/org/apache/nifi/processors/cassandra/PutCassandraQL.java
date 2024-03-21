@@ -17,11 +17,15 @@
 package org.apache.nifi.processors.cassandra;
 
 import com.datastax.oss.driver.api.core.CqlSession;
+import com.datastax.oss.driver.api.core.cql.AsyncResultSet;
 import com.datastax.oss.driver.api.core.cql.BoundStatement;
 import com.datastax.oss.driver.api.core.cql.PreparedStatement;
+import com.datastax.oss.driver.api.core.servererrors.QueryExecutionException;
+import com.datastax.oss.driver.api.core.servererrors.QueryValidationException;
 import com.datastax.oss.driver.api.core.type.DataType;
 import com.datastax.oss.driver.api.core.type.DataTypes;
 import com.datastax.oss.driver.api.core.type.codec.TypeCodec;
+import com.datastax.oss.driver.shaded.guava.common.annotations.VisibleForTesting;
 import com.datastax.oss.driver.shaded.guava.common.cache.CacheBuilder;
 import com.sun.jdi.InvalidTypeException;
 import org.apache.nifi.annotation.behavior.InputRequirement;
@@ -48,7 +52,9 @@ import org.apache.nifi.util.StringUtils;
 
 import java.nio.ByteBuffer;
 import java.nio.charset.Charset;
+import java.time.Duration;
 import java.time.LocalTime;
+import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Date;
@@ -57,6 +63,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.CompletionStage;
 import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
@@ -215,21 +222,21 @@ public class PutCassandraQL extends AbstractCassandraProcessor {
             }
 
             try {
-                ResultSetFuture future = connectionSession.executeAsync(boundStatement);
                 if (statementTimeout > 0) {
-                    future.getUninterruptibly(statementTimeout, TimeUnit.MILLISECONDS);
-                } else {
-                    future.getUninterruptibly();
+                    boundStatement.setTimeout(Duration.of(statementTimeout, ChronoUnit.MINUTES));
                 }
+                CompletionStage<AsyncResultSet> future = connectionSession.executeAsync(boundStatement);
+                future.thenApply(result -> result);
+
                 // Emit a Provenance SEND event
                 final long transmissionMillis = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startNanos);
 
                 // This isn't a real URI but since Cassandra is distributed we just use the cluster name
-                String transitUri = "cassandra://" + connectionSession.getCluster().getMetadata().getClusterName();
+                String transitUri = "cassandra://" + connectionSession.getMetadata().getClusterName();
                 session.getProvenanceReporter().send(flowFile, transitUri, transmissionMillis, true);
                 session.transfer(flowFile, REL_SUCCESS);
 
-            } catch (final TimeoutException e) {
+            } catch (final Exception e) {
                 throw new ProcessException(e);
             }
 
@@ -358,18 +365,18 @@ public class PutCassandraQL extends AbstractCassandraProcessor {
                             if (matcher.groupCount() > 4) {
                                 String secondParamTypeName = matcher.group(5);
                                 DataType secondParamType = getPrimitiveDataTypeFromString(secondParamTypeName);
-                                DataType mapType = DataType.map(firstParamType, secondParamType);
+                                DataType mapType = DataTypes.mapOf(firstParamType, secondParamType);
                                 statement.setMap(paramIndex, (Map) codecRegistry.codecFor(mapType).parse(paramValue));
                                 return;
                             }
                         } else {
                             // Must be set or list
                             if (DataType.Name.SET.toString().equalsIgnoreCase(mainTypeString)) {
-                                DataType setType = DataType.set(firstParamType);
+                                DataType setType = DataTypes.setOf(firstParamType);
                                 statement.setSet(paramIndex, (Set) codecRegistry.codecFor(setType).parse(paramValue));
                                 return;
                             } else if (DataType.Name.LIST.toString().equalsIgnoreCase(mainTypeString)) {
-                                DataType listType = DataType.list(firstParamType);
+                                DataType listType = DataTypes.listOf(firstParamType);
                                 statement.setList(paramIndex, (List) codecRegistry.codecFor(listType).parse(paramValue));
                                 return;
                             }

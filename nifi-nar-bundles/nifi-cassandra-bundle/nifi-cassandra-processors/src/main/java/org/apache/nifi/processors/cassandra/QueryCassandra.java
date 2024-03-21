@@ -18,9 +18,17 @@ package org.apache.nifi.processors.cassandra;
 
 import com.datastax.oss.driver.api.core.CqlSession;
 import com.datastax.oss.driver.api.core.cql.ColumnDefinitions;
+import com.datastax.oss.driver.api.core.cql.PreparedStatement;
 import com.datastax.oss.driver.api.core.cql.ResultSet;
 import com.datastax.oss.driver.api.core.cql.Row;
+import com.datastax.oss.driver.api.core.cql.SimpleStatement;
+import com.datastax.oss.driver.api.core.cql.SimpleStatementBuilder;
+import com.datastax.oss.driver.api.core.cql.Statement;
+import com.datastax.oss.driver.api.core.servererrors.QueryExecutionException;
+import com.datastax.oss.driver.api.core.servererrors.QueryValidationException;
 import com.datastax.oss.driver.api.core.type.DataType;
+import com.datastax.oss.driver.api.core.type.DataTypes;
+import com.datastax.oss.driver.shaded.guava.common.annotations.VisibleForTesting;
 import org.apache.avro.Schema;
 import org.apache.avro.SchemaBuilder;
 import org.apache.avro.file.DataFileWriter;
@@ -269,11 +277,16 @@ public class QueryCassandra extends AbstractCassandraProcessor {
             final CqlSession connectionSession = cassandraSession.get();
             final ResultSet resultSet;
 
+            Statement selectStatement = SimpleStatement.builder(selectQuery)
+                    .setPageSize(fetchSize)
+                    .build();
+
             if (queryTimeout > 0) {
                 resultSet = connectionSession.execute(selectQuery, queryTimeout, TimeUnit.MILLISECONDS);
             }else{
                 resultSet = connectionSession.execute(selectQuery);
             }
+
             final AtomicLong nrOfRows = new AtomicLong(0L);
 
             if(fileToProcess == null) {
@@ -600,8 +613,8 @@ public class QueryCassandra extends AbstractCassandraProcessor {
 
                     outStream.write("{".getBytes(charset));
                     for (int i = 0; i < columnDefinitions.size(); i++) {
-                        final DataType dataType = columnDefinitions.getType(i);
-                        final String colName = columnDefinitions.getName(i);
+                        final DataType dataType = columnDefinitions.get(i).getType();
+                        final String colName = columnDefinitions.get(i).getName().toString();
                         if (i != 0) {
                             outStream.write(",".getBytes(charset));
                         }
@@ -697,32 +710,33 @@ public class QueryCassandra extends AbstractCassandraProcessor {
 
                 DataType dataType = columnDefinitions.get(i).getType();
                 if (dataType == null) {
-                    throw new IllegalArgumentException("No data type for column[" + i + "] with name " + columnDefinitions.getName(i));
+                    throw new IllegalArgumentException("No data type for column[" + i + "] with name "
+                            + columnDefinitions.get(i).getName());
                 }
 
                 // Map types from Cassandra to Avro where possible
                 if (dataType.isCollection()) {
                     List<DataType> typeArguments = dataType.getTypeArguments();
                     if (typeArguments == null || typeArguments.size() == 0) {
-                        throw new IllegalArgumentException("Column[" + i + "] " + dataType.getName()
+                        throw new IllegalArgumentException("Column[" + i + "] " + dataType
                                 + " is a collection but no type arguments were specified!");
                     }
                     // Get the first type argument, to be used for lists and sets
                     DataType firstArg = typeArguments.get(0);
-                    if (dataType.equals(DataType.set(firstArg))
-                            || dataType.equals(DataType.list(firstArg))) {
-                        builder.name(columnDefinitions.getName(i)).type().unionOf().nullBuilder().endNull().and().array()
+                    if (dataType.equals(DataTypes.setOf(firstArg))
+                            || dataType.equals(DataTypes.listOf(firstArg))) {
+                        builder.name(columnDefinitions.get(i).getName().toString()).type().unionOf().nullBuilder().endNull().and().array()
                                 .items(getUnionFieldType(getPrimitiveAvroTypeFromCassandraType(firstArg))).endUnion().noDefault();
                     } else {
                         // Must be an n-arg collection like map
                         DataType secondArg = typeArguments.get(1);
-                        if (dataType.equals(DataType.map(firstArg, secondArg))) {
-                            builder.name(columnDefinitions.getName(i)).type().unionOf().nullBuilder().endNull().and().map().values(
+                        if (dataType.equals(DataTypes.mapOf(firstArg, secondArg))) {
+                            builder.name(columnDefinitions.get(i).getName().toString()).type().unionOf().nullBuilder().endNull().and().map().values(
                                     getUnionFieldType(getPrimitiveAvroTypeFromCassandraType(secondArg))).endUnion().noDefault();
                         }
                     }
                 } else {
-                    builder.name(columnDefinitions.getName(i))
+                    builder.name(columnDefinitions.get(i).getName().toString())
                             .type(getUnionFieldType(getPrimitiveAvroTypeFromCassandraType(dataType))).noDefault();
                 }
             }

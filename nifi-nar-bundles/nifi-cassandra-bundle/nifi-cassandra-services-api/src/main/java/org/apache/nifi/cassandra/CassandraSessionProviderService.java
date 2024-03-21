@@ -16,6 +16,7 @@
  */
 package org.apache.nifi.cassandra;
 
+import com.datastax.oss.driver.api.core.ConsistencyLevel;
 import com.datastax.oss.driver.api.core.CqlSession;
 import io.netty.handler.ssl.ClientAuth;
 import org.apache.nifi.components.PropertyDescriptor;
@@ -23,6 +24,22 @@ import org.apache.nifi.controller.ControllerService;
 import org.apache.nifi.expression.ExpressionLanguageScope;
 import org.apache.nifi.processor.util.StandardValidators;
 import org.apache.nifi.ssl.SSLContextService;
+
+import java.util.Arrays;
+import java.util.List;
+import java.util.stream.Collectors;
+
+import static com.datastax.oss.driver.api.core.ConsistencyLevel.ALL;
+import static com.datastax.oss.driver.api.core.ConsistencyLevel.ANY;
+import static com.datastax.oss.driver.api.core.ConsistencyLevel.EACH_QUORUM;
+import static com.datastax.oss.driver.api.core.ConsistencyLevel.LOCAL_ONE;
+import static com.datastax.oss.driver.api.core.ConsistencyLevel.LOCAL_QUORUM;
+import static com.datastax.oss.driver.api.core.ConsistencyLevel.LOCAL_SERIAL;
+import static com.datastax.oss.driver.api.core.ConsistencyLevel.ONE;
+import static com.datastax.oss.driver.api.core.ConsistencyLevel.QUORUM;
+import static com.datastax.oss.driver.api.core.ConsistencyLevel.SERIAL;
+import static com.datastax.oss.driver.api.core.ConsistencyLevel.THREE;
+import static com.datastax.oss.driver.api.core.ConsistencyLevel.TWO;
 
 public interface CassandraSessionProviderService extends ControllerService {
     /**
@@ -87,13 +104,16 @@ public interface CassandraSessionProviderService extends ControllerService {
             .addValidator(StandardValidators.NON_EMPTY_VALIDATOR)
             .build();
 
-//    PropertyDescriptor CONSISTENCY_LEVEL = new PropertyDescriptor.Builder()
-//            .name("Consistency Level")
-//            .description("The strategy for how many replicas must respond before results are returned.")
-//            .required(true)
-//            .allowableValues(ConsistencyLevel.values())
-//            .defaultValue("ONE")
-//            .build();
+    List<ConsistencyLevel> ALL_CONSISTENCY_VALUES = Arrays.asList(ANY, ONE, TWO, THREE, QUORUM, ALL,
+            LOCAL_ONE, LOCAL_QUORUM, EACH_QUORUM, SERIAL, LOCAL_SERIAL);
+
+    PropertyDescriptor CONSISTENCY_LEVEL = new PropertyDescriptor.Builder()
+            .name("Consistency Level")
+            .description("The strategy for how many replicas must respond before results are returned.")
+            .required(true)
+            .allowableValues(ALL_CONSISTENCY_VALUES.stream().map(ConsistencyLevel::name).collect(Collectors.toSet()))
+            .defaultValue("ONE")
+            .build();
 //
 //    PropertyDescriptor COMPRESSION_TYPE = new PropertyDescriptor.Builder()
 //            .name("Compression Type")
