@@ -840,22 +840,22 @@
         </dependency>
         <dependency>
             <groupId>org.apache.nifi</groupId>
-            <artifactId>nifi-cassandra-distributedmapcache-service</artifactId>
+            <artifactId>nifi-cql-cache-services</artifactId>
             <version>2.0.0-SNAPSHOT</version>
         </dependency>
         <dependency>
             <groupId>org.apache.nifi</groupId>
-            <artifactId>nifi-cassandra-processors</artifactId>
+            <artifactId>nifi-cql-processors</artifactId>
             <version>2.0.0-SNAPSHOT</version>
         </dependency>
         <dependency>
             <groupId>org.apache.nifi</groupId>
-            <artifactId>nifi-cassandra-services</artifactId>
+            <artifactId>nifi-cassandra-session-provider-service</artifactId>
             <version>2.0.0-SNAPSHOT</version>
         </dependency>
         <dependency>
             <groupId>org.apache.nifi</groupId>
-            <artifactId>nifi-cassandra-services-api</artifactId>
+            <artifactId>nifi-cql-services-api</artifactId>
             <version>2.0.0-SNAPSHOT</version>
         </dependency>
         <dependency>

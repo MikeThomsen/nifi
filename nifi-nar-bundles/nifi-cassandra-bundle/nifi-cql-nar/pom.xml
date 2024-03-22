@@ -17,45 +17,35 @@
     <modelVersion>4.0.0</modelVersion>
 
     <parent>
-        <artifactId>nifi-standard-shared-bom</artifactId>
         <groupId>org.apache.nifi</groupId>
+        <artifactId>nifi-cassandra-bundle</artifactId>
         <version>2.0.0-SNAPSHOT</version>
-        <relativePath>../nifi-standard-shared-bundle/nifi-standard-shared-bom</relativePath>
     </parent>
 
-    <properties>
-        <cassandra.sdk.version>3.11.5</cassandra.sdk.version>
-        <cassandra.guava.version>19.0</cassandra.guava.version>
-    </properties>
-
-    <artifactId>nifi-cassandra-bundle</artifactId>
-    <packaging>pom</packaging>
-
-    <modules>
-        <module>nifi-cql-processors</module>
-        <module>nifi-cql-nar</module>
-        <module>nifi-cql-cache-services</module>
-        <module>nifi-cql-cache-services-nar</module>
-        <module>nifi-cql-services-api</module>
-        <module>nifi-cql-services-api-nar</module>
-        <module>nifi-cassandra-session-provider-service</module>
-        <module>nifi-cassandra-session-provider-service-nar</module>
-        <module>nifi-scylladb-session-provider-service</module>
-        <module>nifi-scylladb-session-provider-service-nar</module>
-    </modules>
+    <artifactId>nifi-cql-nar</artifactId>
+    <packaging>nar</packaging>
 
     <dependencyManagement>
         <dependencies>
-            <dependency>
-                <groupId>org.apache.nifi</groupId>
-                <artifactId>nifi-cql-processors</artifactId>
-                <version>2.0.0-SNAPSHOT</version>
-            </dependency>
+            <!-- Provided in nifi-cassandra-services-api-nar -->
             <dependency>
                 <groupId>com.google.guava</groupId>
                 <artifactId>guava</artifactId>
-                <version>${cassandra.guava.version}</version>
+                <scope>provided</scope>
             </dependency>
         </dependencies>
     </dependencyManagement>
+
+    <dependencies>
+        <dependency>
+            <groupId>org.apache.nifi</groupId>
+            <artifactId>nifi-cql-services-api-nar</artifactId>
+            <version>2.0.0-SNAPSHOT</version>
+            <type>nar</type>
+        </dependency>
+        <dependency>
+            <groupId>org.apache.nifi</groupId>
+            <artifactId>nifi-cql-processors</artifactId>
+        </dependency>
+    </dependencies>
 </project>
