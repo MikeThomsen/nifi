@@ -14,17 +14,17 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package org.apache.nifi.service.cassandra;
 
-import org.junit.jupiter.api.BeforeAll;
-import org.testcontainers.junit.jupiter.Testcontainers;
+package org.apache.nifi.service.cql.api.metadata;
 
-@Testcontainers
-public class CassandraCQLExecutionServiceV3IT extends AbstractTestCassandraCQLExecutionService {
-    public static final String CASSANDRA_IMAGE = "cassandra:3.11";
-
-    @BeforeAll
-    public static void setUp() throws Exception {
-        setup(CASSANDRA_IMAGE);
-    }
+/**
+ * Which part of a table's primary key a {@link PrimaryKeyMetadata}/{@link PrimaryKeyIdentifier} describes:
+ * a table's partition key determines which node(s) hold a row; its clustering columns determine row order
+ * within a partition. See {@link PrimaryKey}.
+ */
+public enum PrimaryKeyFieldType {
+    /** A clustering column - orders rows within a partition. */
+    CLUSTERING,
+    /** A partition key column - determines which partition a row belongs to. */
+    PARTITION
 }

@@ -17,8 +17,17 @@
 
 package org.apache.nifi.service.cql.api;
 
+/**
+ * How an {@link CQLExecutionService#update} call applies a record's non-key fields to a row's columns.
+ * {@code INCREMENT}/{@code DECREMENT} only make sense for a counter column, and require the batch statement
+ * type to be {@code COUNTER} or {@code UNLOGGED}, since Cassandra/ScyllaDB reject counter mutations in any
+ * other batch type.
+ */
 public enum UpdateMethod {
+    /** Subtracts a field's value from a counter column. */
     DECREMENT,
+    /** Adds a field's value to a counter column. */
     INCREMENT,
+    /** Overwrites a column's value. */
     SET
 }

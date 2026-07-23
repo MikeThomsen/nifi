@@ -23,6 +23,7 @@ import org.apache.nifi.annotation.documentation.CapabilityDescription;
 import org.apache.nifi.annotation.documentation.Tags;
 import org.apache.nifi.annotation.lifecycle.OnScheduled;
 import org.apache.nifi.components.PropertyDescriptor;
+import org.apache.nifi.components.PropertyValue;
 import org.apache.nifi.expression.ExpressionLanguageScope;
 import org.apache.nifi.flowfile.FlowFile;
 import org.apache.nifi.logging.ComponentLog;
@@ -33,15 +34,15 @@ import org.apache.nifi.processor.exception.ProcessException;
 import org.apache.nifi.processor.util.StandardValidators;
 import org.apache.nifi.serialization.RecordSetWriterFactory;
 import org.apache.nifi.service.cql.api.CQLExecutionService;
+import org.apache.nifi.service.cql.api.QueryOverrides;
 import org.apache.nifi.service.cql.api.exception.QueryFailureException;
 import org.apache.nifi.util.StopWatch;
 
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
-
-import static org.apache.nifi.service.cql.api.CQLExecutionService.FETCH_SIZE;
 
 @Tags({"cassandra", "cql", "select"})
 @InputRequirement(InputRequirement.Requirement.INPUT_ALLOWED)
@@ -74,13 +75,23 @@ public class ExecuteCQLQueryRecord extends AbstractCQLProcessor {
 
     public static final PropertyDescriptor QUERY_TIMEOUT = new PropertyDescriptor.Builder()
             .name("Max Wait Time")
-            .description("The maximum amount of time allowed for a running CQL select query. Must be of format "
-                    + "<duration> <TimeUnit> where <duration> is a non-negative integer and TimeUnit is a supported "
-                    + "Time Unit, such as: nanos, millis, secs, mins, hrs, days. A value of zero means there is no limit. ")
-            .defaultValue("0 seconds")
-            .required(true)
+            .description("The maximum amount of time allowed for this query to run, overriding the Read Timeout configured on the "
+                    + "connection service for this query only. Must be of format <duration> <TimeUnit> where <duration> is a "
+                    + "non-negative integer and TimeUnit is a supported Time Unit, such as: nanos, millis, secs, mins, hrs, days. "
+                    + "If not set, the connection service's configured Read Timeout is used.")
+            .required(false)
             .expressionLanguageSupported(ExpressionLanguageScope.FLOWFILE_ATTRIBUTES)
             .addValidator(StandardValidators.TIME_PERIOD_VALIDATOR)
+            .build();
+
+    public static final PropertyDescriptor FETCH_SIZE = new PropertyDescriptor.Builder()
+            .name("Fetch Size")
+            .description("The number of result rows to be fetched from the result set at a time, overriding the Fetch Size "
+                    + "configured on the connection service for this query only. If not set, the connection service's "
+                    + "configured Fetch Size is used.")
+            .required(false)
+            .expressionLanguageSupported(ExpressionLanguageScope.FLOWFILE_ATTRIBUTES)
+            .addValidator(StandardValidators.INTEGER_VALIDATOR)
             .build();
 
     public static final PropertyDescriptor MAX_ROWS_PER_FLOW_FILE = new PropertyDescriptor.Builder()
@@ -126,7 +137,6 @@ public class ExecuteCQLQueryRecord extends AbstractCQLProcessor {
             CQL_SELECT_QUERY,
             FETCH_SIZE,
             QUERY_TIMEOUT,
-            FETCH_SIZE,
             MAX_ROWS_PER_FLOW_FILE,
             OUTPUT_BATCH_SIZE
     );
@@ -167,10 +177,19 @@ public class ExecuteCQLQueryRecord extends AbstractCQLProcessor {
         final String selectQuery = context.getProperty(CQL_SELECT_QUERY).evaluateAttributeExpressions(fileToProcess).getValue();
         final long maxRowsPerFlowFile = context.getProperty(MAX_ROWS_PER_FLOW_FILE).evaluateAttributeExpressions().asInteger();
         final long outputBatchSize = context.getProperty(OUTPUT_BATCH_SIZE).evaluateAttributeExpressions().asInteger();
+
+        final PropertyValue fetchSizeProperty = context.getProperty(FETCH_SIZE).evaluateAttributeExpressions(fileToProcess);
+        final Integer fetchSizeOverride = fetchSizeProperty.isSet() ? fetchSizeProperty.asInteger() : null;
+
+        final PropertyValue queryTimeoutProperty = context.getProperty(QUERY_TIMEOUT).evaluateAttributeExpressions(fileToProcess);
+        final Duration queryTimeoutOverride = queryTimeoutProperty.isSet() ? queryTimeoutProperty.asDuration() : null;
+
+        final QueryOverrides queryOverrides = new QueryOverrides(fetchSizeOverride, queryTimeoutOverride);
+
         final StopWatch stopWatch = new StopWatch(true);
 
         final RecordSetWriterFactory writerFactory = context.getProperty(OUTPUT_WRITER).asControllerService(RecordSetWriterFactory.class);
-        final CQLExecutionService CQLExecutionService = context.getProperty(CONNECTION_PROVIDER_SERVICE)
+        final CQLExecutionService cqlExecutionService = context.getProperty(CONNECTION_PROVIDER_SERVICE)
                 .asControllerService(CQLExecutionService.class);
 
         try {
@@ -179,7 +198,11 @@ public class ExecuteCQLQueryRecord extends AbstractCQLProcessor {
             ExecuteCQLQueryCallback callback = new ExecuteCQLQueryCallback(fileToProcess, writerFactory, session,
                     getLogger(), maxRowsPerFlowFile, outputBatchSize);
 
-            CQLExecutionService.query(selectQuery, false, new ArrayList<>(), callback);
+            cqlExecutionService.query(selectQuery, false, new ArrayList<>(), callback, queryOverrides);
+
+            if (callback.isEmpty() && fileToProcess != null) {
+                session.transfer(fileToProcess, REL_ORIGINAL);
+            }
 
             stopWatch.stop();
 

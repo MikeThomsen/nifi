@@ -25,9 +25,10 @@ import org.apache.nifi.processor.exception.ProcessException;
 import org.apache.nifi.serialization.RecordSetWriter;
 import org.apache.nifi.serialization.RecordSetWriterFactory;
 import org.apache.nifi.serialization.record.RecordSchema;
-import org.apache.nifi.service.cql.api.CQLFieldInfo;
 import org.apache.nifi.service.cql.api.CQLQueryCallback;
 
+import java.io.Closeable;
+import java.io.OutputStream;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -51,7 +52,6 @@ public class ExecuteCQLQueryCallback implements CQLQueryCallback {
     private final List<FlowFile> flowFileBatch;
     private FlowFile currentFlowFile;
 
-    private long recordsProcessed;
     private int fragmentIndex;
     private UUID fragmentId;
 
@@ -71,25 +71,67 @@ public class ExecuteCQLQueryCallback implements CQLQueryCallback {
         this.flowFilesPerBatch = flowFilesPerBatch;
 
         this.flowFileBatch = new ArrayList<>();
-        this.recordsProcessed = 0;
         this.fragmentIndex = 0;
         this.fragmentId = UUID.randomUUID();
     }
 
+    /**
+     * @return true if no rows were ever received, meaning no FlowFiles were created. The caller is responsible
+     * for routing the incoming FlowFile (if any) in that case, since this callback never gets a chance to.
+     */
+    public boolean isEmpty() {
+        return recordWriter == null;
+    }
+
     private void updateFlowFileAttributes() {
-        Map<String, String> attributes = Map.of(FragmentAttributes.FRAGMENT_COUNT.key(), String.valueOf(recordsProcessed),
+        Map<String, String> attributes = Map.of(
                 FragmentAttributes.FRAGMENT_ID.key(), fragmentId.toString(),
                 FragmentAttributes.FRAGMENT_INDEX.key(), String.valueOf(fragmentIndex++),
                 "mime.type", recordWriter.getMimeType());
 
         this.currentFlowFile = session.putAllAttributes(currentFlowFile, attributes);
-        this.recordsProcessed = 0;
         flowFileBatch.add(currentFlowFile);
     }
 
+    /**
+     * fragment.count can only be known once the whole result set has been processed. When Output Batch Size
+     * commits FlowFiles early, earlier FlowFiles are already released to REL_SUCCESS before the total is known,
+     * so fragment.count is intentionally left unset in that mode, matching the OUTPUT_BATCH_SIZE property
+     * description. Otherwise, every FlowFile in flowFileBatch is still held here, so the true total is known
+     * and applied to all of them.
+     */
+    private void finalizeFragmentCounts() {
+        if (!commitImmediately) {
+            final String totalFragmentCount = String.valueOf(flowFileBatch.size());
+            flowFileBatch.replaceAll(flowFile -> session.putAttribute(flowFile, FragmentAttributes.FRAGMENT_COUNT.key(), totalFragmentCount));
+        }
+    }
+
+    /**
+     * session.remove(FlowFile) refuses to remove a FlowFile with an open OutputStream/callback from
+     * session.write(FlowFile), so any writer or stream tied to a FlowFile being discarded on an error path
+     * must be closed first.
+     */
+    private void closeQuietly(Closeable closeable) {
+        if (closeable != null) {
+            try {
+                closeable.close();
+            } catch (Exception ex) {
+                logger.error("Error closing {}", closeable, ex);
+            }
+        }
+    }
+
+    private void removeUnfinishedFlowFiles() {
+        flowFileBatch.remove(currentFlowFile);
+        session.remove(currentFlowFile);
+        flowFileBatch.forEach(session::remove);
+        flowFileBatch.clear();
+    }
+
     private void initWriter(RecordSchema schema) {
-        try {
-            if (recordWriter != null) {
+        if (recordWriter != null) {
+            try {
                 recordWriter.finishRecordSet();
                 recordWriter.close();
 
@@ -106,14 +148,26 @@ public class ExecuteCQLQueryCallback implements CQLQueryCallback {
                     session.commitAsync();
                     flowFileBatch.clear();
                 }
+            } catch (Exception ex) {
+                closeQuietly(recordWriter);
+                removeUnfinishedFlowFiles();
+
+                throw new ProcessException("Error closing record writer", ex);
             }
+        }
 
-            currentFlowFile = session.create();
-
-            recordWriter = writerFactory.createWriter(logger, schema, session.write(currentFlowFile), currentFlowFile);
+        final FlowFile newFlowFile = session.create();
+        final OutputStream out = session.write(newFlowFile);
+        try {
+            recordWriter = writerFactory.createWriter(logger, schema, out, newFlowFile);
             recordWriter.beginRecordSet();
+            currentFlowFile = newFlowFile;
         } catch (Exception ex) {
+            closeQuietly(out);
+
+            session.remove(newFlowFile);
             flowFileBatch.forEach(session::remove);
+            flowFileBatch.clear();
 
             throw new ProcessException("Error creating record writer", ex);
         }
@@ -121,20 +175,23 @@ public class ExecuteCQLQueryCallback implements CQLQueryCallback {
 
     @Override
     public void receive(long rowNumber,
-                        org.apache.nifi.serialization.record.Record result, List<CQLFieldInfo> fields, boolean hasMore) {
-        if (recordWriter == null || ++currentIndex % rowsPerFlowFile == 0) {
+                        org.apache.nifi.serialization.record.Record result, boolean hasMore) {
+        final boolean shouldRotateWriter = recordWriter == null
+                || (rowsPerFlowFile > 0 && ++currentIndex % rowsPerFlowFile == 0);
+
+        if (shouldRotateWriter) {
             initWriter(result.getSchema());
         }
 
         try {
             recordWriter.write(result);
-            recordsProcessed++;
 
             if (!hasMore) {
                 recordWriter.finishRecordSet();
                 recordWriter.close();
 
                 updateFlowFileAttributes();
+                finalizeFragmentCounts();
 
                 if (parentFlowFile != null) {
                     session.transfer(parentFlowFile, REL_ORIGINAL);
@@ -145,17 +202,8 @@ public class ExecuteCQLQueryCallback implements CQLQueryCallback {
             }
 
         } catch (Exception ex) {
-            if (recordWriter != null) {
-                try {
-                    recordWriter.close();
-                } catch (Exception e) {
-                    logger.error("Error closing record writer", e);
-                }
-            }
-
-            if (!flowFileBatch.isEmpty()) {
-                flowFileBatch.forEach(session::remove);
-            }
+            closeQuietly(recordWriter);
+            removeUnfinishedFlowFiles();
 
             throw new ProcessException("Error writing record", ex);
         }

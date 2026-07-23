@@ -1,0 +1,21 @@
+# Minimal single-node ScyllaDB configuration for this module's IT containers. Client-to-node TLS
+# (client_encryption_options) and the bootstrap authenticator/auth_superuser_* settings are appended onto
+# this template at runtime by the individual IT classes (see ScyllaSslIT/ScyllaAuthenticationIT), not set
+# here. Parameter names and defaults are per the ScyllaDB Configuration Reference:
+# https://docs.scylladb.com/manual/stable/reference/configuration-parameters.html
+
+seed_provider:
+  - class_name: org.apache.cassandra.locator.SimpleSeedProvider
+    parameters:
+      - seeds: "127.0.0.1"
+
+listen_address: localhost
+rpc_address: localhost
+
+native_transport_port: 9042
+
+# SimpleSnitch assigns every node to datacenter "datacenter1" / rack "rack1" - the datacenter name the IT
+# tests use when creating their test keyspace with NetworkTopologyStrategy.
+endpoint_snitch: org.apache.cassandra.locator.SimpleSnitch
+
+partitioner: org.apache.cassandra.dht.Murmur3Partitioner

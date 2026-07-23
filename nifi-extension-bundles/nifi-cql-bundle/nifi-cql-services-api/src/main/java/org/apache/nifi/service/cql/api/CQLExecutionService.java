@@ -20,16 +20,31 @@ import com.datastax.oss.driver.api.core.ConsistencyLevel;
 import com.datastax.oss.driver.api.core.DefaultConsistencyLevel;
 import io.netty.handler.ssl.ClientAuth;
 import org.apache.nifi.components.PropertyDescriptor;
+import org.apache.nifi.components.resource.ResourceCardinality;
+import org.apache.nifi.components.resource.ResourceType;
 import org.apache.nifi.controller.ControllerService;
 import org.apache.nifi.expression.ExpressionLanguageScope;
 import org.apache.nifi.processor.util.StandardValidators;
+import org.apache.nifi.record.path.RecordPath;
 import org.apache.nifi.service.cql.api.exception.QueryFailureException;
+import org.apache.nifi.service.cql.api.metadata.PrimaryKey;
+import org.apache.nifi.service.cql.api.metadata.PrimaryKeyIdentifier;
+import org.apache.nifi.service.cql.api.metadata.QualifiedTableName;
 import org.apache.nifi.ssl.SSLContextService;
 
 import java.util.List;
+import java.util.Map;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
+/**
+ * Connection abstraction for Apache Cassandra/ScyllaDB, consumed by {@code PutCQLRecord} and
+ * {@code ExecuteCQLQueryRecord} without either processor needing to know which backend-specific driver
+ * implementation ({@code CassandraCQLExecutionService} or {@code ScyllaDBCQLExecutionService}) is actually
+ * configured. Property descriptors here are shared connection settings (contact points, datacenter,
+ * credentials, TLS, timeouts, etc.) that both implementations expose identically; the methods below are the
+ * query/write contract every implementation must provide.
+ */
 public interface CQLExecutionService extends ControllerService {
     PropertyDescriptor CONTACT_POINTS = new PropertyDescriptor.Builder()
             .name("Cassandra Contact Points")
@@ -140,17 +155,139 @@ public interface CQLExecutionService extends ControllerService {
             .addValidator(StandardValidators.TIME_PERIOD_VALIDATOR)
             .build();
 
-    void query(String cql, boolean cacheStatement, List parameters, CQLQueryCallback callback) throws QueryFailureException;
+    PropertyDescriptor DEFAULT_TTL = new PropertyDescriptor.Builder()
+            .name("Default Time To Live")
+            .description("The default Time To Live (TTL) to apply to INSERT statements and SET-method UPDATE statements when a "
+                    + "processor does not override it. Counter UPDATE statements never have a TTL applied, since Cassandra/ScyllaDB do not "
+                    + "support one on counter columns. If not set, no TTL is applied and the table's own default_time_to_live (if any) governs.")
+            .required(false)
+            .expressionLanguageSupported(ExpressionLanguageScope.ENVIRONMENT)
+            .addValidator(StandardValidators.TIME_PERIOD_VALIDATOR)
+            .build();
 
-    void insert(String table, org.apache.nifi.serialization.record.Record record);
+    /**
+     * The precedence described here (file settings override the other connection properties, with
+     * fallback to those properties for anything the file omits) mirrors the composition semantics of
+     * {@code DriverConfigLoader.compose(primary, fallback)} in the DataStax Java Driver, where "the driver
+     * reads an option [from] the 'primary' config ... first[; i]f the option is missing, then it will be
+     * looked up in the 'fallback' config" (javadoc on
+     * {@code com.datastax.oss.driver.api.core.config.DriverConfigLoader#compose}, java-driver-core
+     * 4.19.3, {@code DriverConfigLoader.java}). ScyllaDB's shard-aware driver (com.scylladb:java-driver-core)
+     * is a fork that retains the same {@code com.datastax.oss.driver.api.core.config} package and HOCON
+     * config format, so the same file and precedence apply unchanged when this service targets ScyllaDB.
+     */
+    PropertyDescriptor DRIVER_CONFIGURATION_FILE = new PropertyDescriptor.Builder()
+            .name("Driver Configuration File")
+            .description("Path to an optional Java Driver configuration file using the driver's standard "
+                    + "typesafe-config (HOCON) format, for example an application.conf providing advanced "
+                    + "settings such as load balancing policy, retry policy, or speculative execution that "
+                    + "are not otherwise exposed as properties on this service. Settings in this file take "
+                    + "precedence over the other connection properties configured here; any setting not "
+                    + "present in the file falls back to those properties or the driver's built-in defaults. "
+                    + "ScyllaDB's Java Driver is a shard-aware fork of the DataStax Java Driver that reads the "
+                    + "same configuration format, so this file works unchanged when connecting to ScyllaDB.")
+            .required(false)
+            .identifiesExternalResource(ResourceCardinality.SINGLE, ResourceType.FILE)
+            .expressionLanguageSupported(ExpressionLanguageScope.ENVIRONMENT)
+            .build();
 
-    void insert(String table, List<org.apache.nifi.serialization.record.Record> records);
+    /**
+     * Executes a CQL statement (typically a {@code SELECT}) and streams results back one row at a time via
+     * {@code callback.receive(...)} rather than materializing the whole result set, so arbitrarily large
+     * result sets are supported.
+     *
+     * @param cql the CQL statement text, with {@code ?} bind markers for any positional {@code parameters}
+     * @param cacheStatement accepted for a future prepared-statement caching strategy; not currently read by
+     * any implementation in this codebase
+     * @param parameters positional values bound to {@code cql}'s bind markers, in order; may be {@code null}
+     * or empty for a statement with no parameters
+     * @param callback invoked once per result row, and finally with {@code isExhausted = true} on the last row
+     * @param overrides per-call fetch size/timeout overrides; use {@link QueryOverrides#NONE} for none
+     * @throws QueryFailureException if the query failed at the driver/server level (as opposed to, for
+     * example, malformed input, which implementations may instead surface as an unchecked exception)
+     */
+    void query(String cql, boolean cacheStatement, List parameters, CQLQueryCallback callback, QueryOverrides overrides) throws QueryFailureException;
 
-    String getTransitUrl(String tableName);
+    /**
+     * Writes a single record to {@code table} via {@code INSERT}. Each record field is written to the column
+     * of the same name by default, including primary key columns - Cassandra/ScyllaDB require all primary
+     * key columns to be supplied as ordinary column values in an {@code INSERT}, the same as any other
+     * column - unless overridden per {@code primaryKeyOverrides}.
+     *
+     * @param table the keyspace-qualified (or, if the connection has a default keyspace, unqualified) target table
+     * @param record the record to write
+     * @param primaryKeyOverrides for a given keyspace/table/column identified by a {@link PrimaryKeyIdentifier}
+     * key, evaluates the associated {@link RecordPath} against the record to resolve that column's value
+     * instead of looking up a same-named record field; the RecordPath must resolve to exactly one value
+     * @param overrides per-call TTL/write-timestamp overrides; use {@link WriteOverrides#NONE} for none
+     * @throws QueryFailureException if the write failed at the driver/server level
+     */
+    void insert(QualifiedTableName table, org.apache.nifi.serialization.record.Record record, Map<PrimaryKeyIdentifier, RecordPath> primaryKeyOverrides, WriteOverrides overrides) throws QueryFailureException;
 
-    void delete(String cassandraTable, org.apache.nifi.serialization.record.Record record, List<String> updateKeys);
+    /**
+     * Batch form of {@link #insert(QualifiedTableName, org.apache.nifi.serialization.record.Record, Map, WriteOverrides)}:
+     * writes every record in {@code records} to {@code table} as a single {@code BatchStatement} of the given
+     * {@code batchType}. All records are expected to share the same schema, since one prepared statement is
+     * built from the first record and reused for the rest. A {@code null} or empty {@code records} is a no-op.
+     *
+     * @throws QueryFailureException if the batch failed at the driver/server level
+     */
+    void insert(QualifiedTableName table, List<org.apache.nifi.serialization.record.Record> records, Map<PrimaryKeyIdentifier, RecordPath> primaryKeyOverrides, CqlBatchType batchType, WriteOverrides overrides) throws QueryFailureException;
 
-    void update(String cassandraTable, org.apache.nifi.serialization.record.Record record, List<String> updateKeys, UpdateMethod updateMethod);
+    /**
+     * @return an identifier for where a write to {@code tableName} went, suitable for provenance reporting -
+     * not a literal, dereferenceable network URL
+     */
+    String getTransitUrl(QualifiedTableName tableName);
 
-    void update(String cassandraTable, List<org.apache.nifi.serialization.record.Record> records, List<String> updateKeys, UpdateMethod updateMethod);
+    /**
+     * Deletes the single row identified by {@code updateKeys} from {@code cassandraTable} via {@code DELETE}.
+     *
+     * @param record supplies the values for each column named in {@code updateKeys}, by matching field name
+     * @param primaryKeyOverrides as in {@link #insert}, resolves a specific column's value via a RecordPath
+     * instead of a same-named record field
+     * @param updateKeys the column names identifying the row to delete; must not be {@code null} or empty,
+     * and every name must be present as a field in {@code record}
+     * @throws QueryFailureException if the delete failed at the driver/server level
+     */
+    void delete(QualifiedTableName cassandraTable, org.apache.nifi.serialization.record.Record record, Map<PrimaryKeyIdentifier, RecordPath> primaryKeyOverrides, List<String> updateKeys) throws QueryFailureException;
+
+    /**
+     * Writes a single record to {@code cassandraTable} via {@code UPDATE}. {@code updateKeys} name the
+     * columns that identify the row (the {@code WHERE} clause); every other field in the record is applied
+     * according to {@code updateMethod}.
+     *
+     * @param primaryKeyOverrides as in {@link #insert}, resolves a specific column's value via a RecordPath
+     * instead of a same-named record field
+     * @param updateKeys the column names identifying the row to update; must not be {@code null} or empty,
+     * and every name must be present as a field in {@code record}
+     * @param updateMethod {@code SET} to overwrite a column's value, or {@code INCREMENT}/{@code DECREMENT}
+     * to adjust a counter column
+     * @param overrides per-call TTL/write-timestamp overrides; ignored for {@code INCREMENT}/{@code DECREMENT},
+     * since Cassandra/ScyllaDB do not support a TTL or custom write timestamp on counter columns
+     * @throws QueryFailureException if the update failed at the driver/server level
+     */
+    void update(QualifiedTableName cassandraTable, org.apache.nifi.serialization.record.Record record, Map<PrimaryKeyIdentifier, RecordPath> primaryKeyOverrides, List<String> updateKeys, UpdateMethod updateMethod, WriteOverrides overrides) throws QueryFailureException;
+
+    /**
+     * Batch form of {@link #update(QualifiedTableName, org.apache.nifi.serialization.record.Record, Map, List, UpdateMethod, WriteOverrides)}:
+     * applies the same update to every record in {@code records} against {@code cassandraTable} as a single
+     * {@code BatchStatement} of the given {@code batchType}. All records are expected to share the same
+     * schema, since one prepared statement is built from the first record and reused for the rest.
+     * {@code INCREMENT}/{@code DECREMENT} requires {@code batchType} to be {@code COUNTER} or
+     * {@code UNLOGGED}, since Cassandra/ScyllaDB reject counter mutations in any other batch type. A
+     * {@code null} or empty {@code records} is a no-op.
+     *
+     * @throws QueryFailureException if the batch failed at the driver/server level
+     */
+    void update(QualifiedTableName cassandraTable, List<org.apache.nifi.serialization.record.Record> records, Map<PrimaryKeyIdentifier, RecordPath> primaryKeyOverrides, List<String> updateKeys, UpdateMethod updateMethod,
+                CqlBatchType batchType, WriteOverrides overrides) throws QueryFailureException;
+
+    /**
+     * @param table the keyspace-qualified (or, if the connection has a default keyspace, unqualified) table
+     * to describe
+     * @return {@code table}'s primary key structure - its partition key columns and clustering columns, each
+     * in their real declared order - resolved from the cluster's own schema metadata
+     */
+    PrimaryKey getMetadata(QualifiedTableName table);
 }

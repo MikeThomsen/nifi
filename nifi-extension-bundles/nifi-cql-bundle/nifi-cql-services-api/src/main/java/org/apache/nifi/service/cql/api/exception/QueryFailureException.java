@@ -17,5 +17,12 @@
 
 package org.apache.nifi.service.cql.api.exception;
 
+/**
+ * Signals that a {@code CQLExecutionService} call failed at the driver/server level - for example, a query
+ * execution failure or a failure to reach any cluster node - as opposed to a configuration or data problem
+ * (which implementations may instead surface as an unchecked exception such as {@link IllegalArgumentException}).
+ * Callers (such as {@code PutCQLRecord}/{@code ExecuteCQLQueryRecord}) generally treat this distinction as
+ * "may succeed if retried" versus "will not succeed without a configuration or data change".
+ */
 public class QueryFailureException extends RuntimeException {
 }

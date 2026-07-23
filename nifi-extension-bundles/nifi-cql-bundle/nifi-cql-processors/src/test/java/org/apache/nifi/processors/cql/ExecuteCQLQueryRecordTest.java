@@ -18,6 +18,7 @@
 package org.apache.nifi.processors.cql;
 
 import org.apache.nifi.flowfile.attributes.FragmentAttributes;
+import org.apache.nifi.processors.cql.mock.FailingRecordSetWriterFactory;
 import org.apache.nifi.processors.cql.mock.MockCQLQueryExecutionService;
 import org.apache.nifi.serialization.SimpleRecordSchema;
 import org.apache.nifi.serialization.record.MapRecord;
@@ -25,22 +26,30 @@ import org.apache.nifi.serialization.record.MockRecordWriter;
 import org.apache.nifi.serialization.record.Record;
 import org.apache.nifi.serialization.record.RecordField;
 import org.apache.nifi.serialization.record.RecordFieldType;
+import org.apache.nifi.service.cql.api.QueryOverrides;
 import org.apache.nifi.util.MockFlowFile;
 import org.apache.nifi.util.TestRunner;
 import org.apache.nifi.util.TestRunners;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
+import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 
+import java.time.Duration;
 import java.util.ArrayList;
+import java.util.Collections;
+import java.util.Comparator;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 public class ExecuteCQLQueryRecordTest {
@@ -53,12 +62,14 @@ public class ExecuteCQLQueryRecordTest {
     }
 
     @DisplayName("Verify the normal write behavior with different record counts and expected batch sizes")
-    @ParameterizedTest(name = "rows per file={0},generated records={1},expected ff count={2}")
+    @ParameterizedTest(name = "rows per file={0},generated records={1},expected ff count={2},output batch size={3}")
     @CsvSource({
         "5,4,1,0",
         "5,100,20,0",
         "5,101,21,0",
-        "5,100,20,1"
+        "5,100,20,1",
+        "50,3000,60,5",
+        "0,100,1,0"
     })
     public void testSimpleWriteScenario(int rowsPerFlowFile, int recordCount,
                                         int expectedFlowFileCount,
@@ -97,19 +108,180 @@ public class ExecuteCQLQueryRecordTest {
 
         List<MockFlowFile> flowFiles = testRunner.getFlowFilesForRelationship(ExecuteCQLQueryRecord.REL_SUCCESS);
         assertEquals(expectedFlowFileCount, flowFiles.size());
-        flowFiles.forEach(ff -> {
-            assertNotNull(ff.getAttribute(FragmentAttributes.FRAGMENT_ID.key()));
-            assertNotNull(ff.getAttribute(FragmentAttributes.FRAGMENT_COUNT.key()));
-            assertNotNull(ff.getAttribute(FragmentAttributes.FRAGMENT_INDEX.key()));
+        flowFiles.sort(Comparator.comparingInt(ff -> Integer.parseInt(ff.getAttribute(FragmentAttributes.FRAGMENT_INDEX.key()))));
 
-            int fragmentIndex = Integer.parseInt(ff.getAttribute(FragmentAttributes.FRAGMENT_INDEX.key()));
-            int rowCount = Integer.parseInt(ff.getAttribute(FragmentAttributes.FRAGMENT_COUNT.key()));
+        final boolean batching = outputBatchSize > 0;
+        final Set<String> fragmentIds = new HashSet<>();
+        int recordsRemaining = recordCount;
+
+        for (MockFlowFile ff : flowFiles) {
             String fragmentId = ff.getAttribute(FragmentAttributes.FRAGMENT_ID.key());
-
-            assertTrue(fragmentIndex < expectedFlowFileCount);
-            assertTrue(rowCount > 0 && rowCount <= rowsPerFlowFile);
-
+            assertNotNull(fragmentId);
             assertDoesNotThrow(() -> UUID.fromString(fragmentId));
-        });
+            fragmentIds.add(fragmentId);
+
+            assertNotNull(ff.getAttribute(FragmentAttributes.FRAGMENT_INDEX.key()));
+            int fragmentIndex = Integer.parseInt(ff.getAttribute(FragmentAttributes.FRAGMENT_INDEX.key()));
+            assertTrue(fragmentIndex < expectedFlowFileCount);
+
+            // fragment.count is only knowable once the whole result set has been processed, which isn't the
+            // case once Output Batch Size starts releasing FlowFiles early - see OUTPUT_BATCH_SIZE's description.
+            if (batching) {
+                assertNull(ff.getAttribute(FragmentAttributes.FRAGMENT_COUNT.key()));
+            } else {
+                assertEquals(String.valueOf(expectedFlowFileCount), ff.getAttribute(FragmentAttributes.FRAGMENT_COUNT.key()));
+            }
+
+            int rowsInFile = ff.getContent().isEmpty() ? 0 : ff.getContent().split("\n").length;
+            int expectedRowsInFile = rowsPerFlowFile == 0 ? recordCount : Math.min(rowsPerFlowFile, recordsRemaining);
+            assertEquals(expectedRowsInFile, rowsInFile);
+            recordsRemaining -= rowsInFile;
+        }
+
+        assertEquals(1, fragmentIds.size());
+        assertEquals(0, recordsRemaining);
+    }
+
+    private MockCQLQueryExecutionService runWithSingleRecord() throws Exception {
+        testRunner.setProperty(ExecuteCQLQueryRecord.MAX_ROWS_PER_FLOW_FILE, "10");
+
+        MockRecordWriter parser = new MockRecordWriter();
+        RecordField field1 = new RecordField("a", RecordFieldType.STRING.getDataType());
+        SimpleRecordSchema schema = new SimpleRecordSchema(List.of(field1));
+
+        List<Record> data = new ArrayList<>();
+        data.add(new MapRecord(schema, Map.of("a", "value")));
+
+        MockCQLQueryExecutionService service = new MockCQLQueryExecutionService(data.iterator());
+
+        testRunner.setProperty(ExecuteCQLQueryRecord.CONNECTION_PROVIDER_SERVICE, "connection");
+        testRunner.addControllerService("connection", service);
+        testRunner.enableControllerService(service);
+        testRunner.setProperty(ExecuteCQLQueryRecord.OUTPUT_WRITER, "writer");
+        testRunner.addControllerService("writer", parser);
+        testRunner.enableControllerService(parser);
+        testRunner.assertValid();
+
+        testRunner.enqueue("parent_file");
+        testRunner.run();
+
+        return service;
+    }
+
+    @Test
+    @DisplayName("Verify that fetch size and query timeout overrides are unset by default, deferring to the connection service")
+    public void testQueryOverridesDefaultToUnset() throws Exception {
+        MockCQLQueryExecutionService service = runWithSingleRecord();
+
+        QueryOverrides overrides = service.getLastQueryOverrides();
+        assertNotNull(overrides);
+        assertNull(overrides.fetchSize());
+        assertNull(overrides.timeout());
+    }
+
+    @Test
+    @DisplayName("Verify that fetch size and query timeout overrides are forwarded to the connection service when set")
+    public void testQueryOverridesForwardedWhenSet() throws Exception {
+        testRunner.setProperty(ExecuteCQLQueryRecord.FETCH_SIZE, "250");
+        testRunner.setProperty(ExecuteCQLQueryRecord.QUERY_TIMEOUT, "5 sec");
+
+        MockCQLQueryExecutionService service = runWithSingleRecord();
+
+        QueryOverrides overrides = service.getLastQueryOverrides();
+        assertNotNull(overrides);
+        assertEquals(250, overrides.fetchSize());
+        assertEquals(Duration.ofSeconds(5), overrides.timeout());
+    }
+
+    @Test
+    @DisplayName("Verify that an incoming FlowFile is routed to 'original' when the query returns no rows")
+    public void testEmptyResultSetRoutesParentToOriginal() throws Exception {
+        testRunner.setProperty(ExecuteCQLQueryRecord.MAX_ROWS_PER_FLOW_FILE, "5");
+
+        MockRecordWriter parser = new MockRecordWriter();
+        MockCQLQueryExecutionService service = new MockCQLQueryExecutionService(Collections.<Record>emptyList().iterator());
+
+        testRunner.setProperty(ExecuteCQLQueryRecord.CONNECTION_PROVIDER_SERVICE, "connection");
+        testRunner.addControllerService("connection", service);
+        testRunner.enableControllerService(service);
+        testRunner.setProperty(ExecuteCQLQueryRecord.OUTPUT_WRITER, "writer");
+        testRunner.addControllerService("writer", parser);
+        testRunner.enableControllerService(parser);
+        testRunner.assertValid();
+
+        testRunner.enqueue("parent_file");
+        testRunner.run();
+
+        testRunner.assertTransferCount(ExecuteCQLQueryRecord.REL_ORIGINAL, 1);
+        testRunner.assertTransferCount(ExecuteCQLQueryRecord.REL_SUCCESS, 0);
+        testRunner.assertTransferCount(ExecuteCQLQueryRecord.REL_FAILURE, 0);
+        testRunner.assertTransferCount(ExecuteCQLQueryRecord.REL_RETRY, 0);
+    }
+
+    @Test
+    @DisplayName("Verify that a mid-stream write failure routes to failure without leaking the in-progress FlowFile")
+    public void testWriteFailureRoutesToFailureWithoutLeakingFlowFiles() throws Exception {
+        testRunner.setProperty(ExecuteCQLQueryRecord.MAX_ROWS_PER_FLOW_FILE, "100");
+
+        // MockRecordWriter's failAfterN throws an IOException once N records have been written, simulating a
+        // downstream serialization failure partway through a FlowFile.
+        MockRecordWriter parser = new MockRecordWriter(null, true, 2);
+
+        RecordField field1 = new RecordField("a", RecordFieldType.STRING.getDataType());
+        SimpleRecordSchema schema = new SimpleRecordSchema(List.of(field1));
+
+        List<Record> data = new ArrayList<>();
+        for (int i = 0; i < 5; i++) {
+            data.add(new MapRecord(schema, Map.of("a", "value" + i)));
+        }
+
+        MockCQLQueryExecutionService service = new MockCQLQueryExecutionService(data.iterator());
+
+        testRunner.setProperty(ExecuteCQLQueryRecord.CONNECTION_PROVIDER_SERVICE, "connection");
+        testRunner.addControllerService("connection", service);
+        testRunner.enableControllerService(service);
+        testRunner.setProperty(ExecuteCQLQueryRecord.OUTPUT_WRITER, "writer");
+        testRunner.addControllerService("writer", parser);
+        testRunner.enableControllerService(parser);
+        testRunner.assertValid();
+
+        testRunner.enqueue("parent_file");
+        testRunner.run();
+
+        testRunner.assertTransferCount(ExecuteCQLQueryRecord.REL_FAILURE, 1);
+        testRunner.assertTransferCount(ExecuteCQLQueryRecord.REL_SUCCESS, 0);
+        testRunner.assertTransferCount(ExecuteCQLQueryRecord.REL_ORIGINAL, 0);
+        testRunner.assertTransferCount(ExecuteCQLQueryRecord.REL_RETRY, 0);
+    }
+
+    @Test
+    @DisplayName("Verify that a record writer creation failure routes to failure without leaking the newly-created FlowFile")
+    public void testWriterCreationFailureRoutesToFailureWithoutLeakingFlowFiles() throws Exception {
+        testRunner.setProperty(ExecuteCQLQueryRecord.MAX_ROWS_PER_FLOW_FILE, "5");
+
+        RecordField field1 = new RecordField("a", RecordFieldType.STRING.getDataType());
+        SimpleRecordSchema schema = new SimpleRecordSchema(List.of(field1));
+
+        List<Record> data = new ArrayList<>();
+        data.add(new MapRecord(schema, Map.of("a", "value")));
+
+        MockCQLQueryExecutionService service = new MockCQLQueryExecutionService(data.iterator());
+        FailingRecordSetWriterFactory writer = new FailingRecordSetWriterFactory();
+
+        testRunner.setProperty(ExecuteCQLQueryRecord.CONNECTION_PROVIDER_SERVICE, "connection");
+        testRunner.addControllerService("connection", service);
+        testRunner.enableControllerService(service);
+        testRunner.setProperty(ExecuteCQLQueryRecord.OUTPUT_WRITER, "writer");
+        testRunner.addControllerService("writer", writer);
+        testRunner.enableControllerService(writer);
+        testRunner.assertValid();
+
+        testRunner.enqueue("parent_file");
+        testRunner.run();
+
+        testRunner.assertTransferCount(ExecuteCQLQueryRecord.REL_FAILURE, 1);
+        testRunner.assertTransferCount(ExecuteCQLQueryRecord.REL_SUCCESS, 0);
+        testRunner.assertTransferCount(ExecuteCQLQueryRecord.REL_ORIGINAL, 0);
+        testRunner.assertTransferCount(ExecuteCQLQueryRecord.REL_RETRY, 0);
     }
 }

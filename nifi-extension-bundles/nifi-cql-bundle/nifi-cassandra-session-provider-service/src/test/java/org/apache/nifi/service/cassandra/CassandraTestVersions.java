@@ -14,17 +14,27 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 package org.apache.nifi.service.cassandra;
 
-import org.junit.jupiter.api.BeforeAll;
-import org.testcontainers.junit.jupiter.Testcontainers;
+import java.util.stream.Stream;
 
-@Testcontainers
-public class CassandraCQLExecutionServiceV4IT extends AbstractTestCassandraCQLExecutionService {
-    public static String CASSANDRA_IMAGE = "cassandra:4.1";
+/**
+ * Supplies the Cassandra major versions that the {@code @ParameterizedClass} integration tests in this
+ * package run against. Cassandra 3.11 and 4.1 containers are slow to start and are no longer receiving
+ * upstream support, so they're only exercised when the {@code TEST_CASSANDRA_OLDER_VERSIONS} system
+ * property is set to {@code true}; otherwise only the current major version (5.0) runs.
+ */
+final class CassandraTestVersions {
 
-    @BeforeAll
-    public static void beforAll() throws Exception {
-        setup(CASSANDRA_IMAGE);
+    private static final String RUN_OLDER_VERSIONS_PROPERTY = "TEST_CASSANDRA_OLDER_VERSIONS";
+
+    private CassandraTestVersions() {
+    }
+
+    static Stream<String> allVersions() {
+        return Boolean.getBoolean(RUN_OLDER_VERSIONS_PROPERTY)
+                ? Stream.of("3.11", "4.1", "5.0")
+                : Stream.of("5.0");
     }
 }

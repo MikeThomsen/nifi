@@ -14,18 +14,15 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+package org.apache.nifi.service.cql.api;
 
-package org.apache.nifi.service.cassandra;
+import java.time.Duration;
 
-import org.junit.jupiter.api.BeforeAll;
-import org.testcontainers.junit.jupiter.Testcontainers;
-
-@Testcontainers
-public class CassandraCQLExecutionServiceV5IT extends AbstractTestCassandraCQLExecutionService {
-    public static final String CASSANDRA_IMAGE = "cassandra:5.0";
-
-    @BeforeAll
-    public static void beforeAll() throws Exception {
-        setup(CASSANDRA_IMAGE);
-    }
+/**
+ * Per-call overrides for a single {@link CQLExecutionService#query} invocation. Any field left {@code null}
+ * means "use the value configured on the {@link CQLExecutionService} itself". Additional overrides can be
+ * added here as new record components without changing the {@code query} method signature again.
+ */
+public record QueryOverrides(Integer fetchSize, Duration timeout) {
+    public static final QueryOverrides NONE = new QueryOverrides(null, null);
 }

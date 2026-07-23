@@ -17,26 +17,13 @@
 
 package org.apache.nifi.service.cql.api;
 
-public class CQLFieldInfo {
-    private String fieldName;
-    private String dataType;
-    private int dataTypeProtocolCode;
-
-    public CQLFieldInfo(String fieldName, String dataType, int dataTypeProtocolCode) {
-        this.fieldName = fieldName;
-        this.dataType = dataType;
-        this.dataTypeProtocolCode = dataTypeProtocolCode;
-    }
-
-    public String getFieldName() {
-        return fieldName;
-    }
-
-    public String getDataType() {
-        return dataType;
-    }
-
-    public int getDataTypeProtocolCode() {
-        return dataTypeProtocolCode;
-    }
+/**
+ * The type of batch statement to use when {@link CQLExecutionService} writes more than one record at a time.
+ * Mirrors Cassandra's own batch semantics: {@code COUNTER} is required for counter mutations, which cannot be
+ * mixed into a {@code LOGGED} or {@code UNLOGGED} batch.
+ */
+public enum CqlBatchType {
+    LOGGED,
+    UNLOGGED,
+    COUNTER
 }

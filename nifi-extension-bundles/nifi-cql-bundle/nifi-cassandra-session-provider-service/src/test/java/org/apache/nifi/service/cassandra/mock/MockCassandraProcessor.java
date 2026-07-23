@@ -31,7 +31,7 @@ import java.util.List;
  * Mock Cassandra processor for testing CassandraSessionProvider
  */
 public class MockCassandraProcessor extends AbstractProcessor {
-    private static PropertyDescriptor CASSANDRA_SESSION_PROVIDER = new PropertyDescriptor.Builder()
+    private static final PropertyDescriptor CASSANDRA_SESSION_PROVIDER = new PropertyDescriptor.Builder()
             .name("Cassandra Session Provider")
             .required(true)
             .description("Controller Service to obtain a Cassandra connection session")

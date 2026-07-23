@@ -290,3 +290,24 @@ The following binary components are provided under the Eclipse Public License 1.
     (EPL 2.0)(GPL 2)(LGPL 2.1) JNR Posix ( jnr.posix ) https://github.com/jnr/jnr-posix/blob/master/LICENSE.txt
     (EPL 1.0)(LGPL 2.1) Logback Classic (ch.qos.logback:logback-classic:jar:1.2.6 - http://logback.qos.ch/)
     (EPL 1.0)(LGPL 2.1) Logback Core (ch.qos.logback:logback-core:jar:1.2.6 - http://logback.qos.ch/)
+
+************************
+Test-Only Resources
+************************
+
+The following are not distributed as part of this module's binary (.nar) build, but are present in the
+source tree under nifi-cassandra-session-provider-service/src/test/resources/ and are copied, with
+explanatory comments trimmed, from the stock cassandra.yaml shipped in the corresponding Apache Cassandra
+release:
+
+  - cassandra-base-config/cassandra.yaml (from Apache Cassandra 5.0)
+  - cassandra-auth-config-4.1/cassandra.yaml (from Apache Cassandra 4.1)
+  - cassandra-auth-config-3.11/cassandra.yaml (from Apache Cassandra 3.11)
+
+  (ASLv2) Apache Cassandra
+      The following NOTICE information applies:
+        Apache Cassandra
+        Copyright 2009- The Apache Software Foundation
+
+        This product includes software developed by The Apache Software
+        Foundation (http://www.apache.org/).

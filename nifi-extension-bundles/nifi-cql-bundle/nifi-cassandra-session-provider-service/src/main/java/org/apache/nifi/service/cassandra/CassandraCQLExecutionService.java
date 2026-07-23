@@ -16,6 +16,8 @@
  */
 package org.apache.nifi.service.cassandra;
 
+import com.datastax.oss.driver.api.core.AllNodesFailedException;
+import com.datastax.oss.driver.api.core.CqlIdentifier;
 import com.datastax.oss.driver.api.core.CqlSession;
 import com.datastax.oss.driver.api.core.CqlSessionBuilder;
 import com.datastax.oss.driver.api.core.config.DefaultDriverOption;
@@ -29,16 +31,23 @@ import com.datastax.oss.driver.api.core.cql.PreparedStatement;
 import com.datastax.oss.driver.api.core.cql.ResultSet;
 import com.datastax.oss.driver.api.core.cql.Row;
 import com.datastax.oss.driver.api.core.cql.SimpleStatement;
+import com.datastax.oss.driver.api.core.cql.SimpleStatementBuilder;
 import com.datastax.oss.driver.api.core.cql.Statement;
+import com.datastax.oss.driver.api.core.data.UdtValue;
+import com.datastax.oss.driver.api.core.metadata.schema.ColumnMetadata;
+import com.datastax.oss.driver.api.core.metadata.schema.KeyspaceMetadata;
+import com.datastax.oss.driver.api.core.metadata.schema.TableMetadata;
 import com.datastax.oss.driver.api.core.servererrors.QueryExecutionException;
 import com.datastax.oss.driver.api.core.type.DataType;
 import com.datastax.oss.driver.api.core.type.DataTypes;
 import com.datastax.oss.driver.api.core.type.ListType;
 import com.datastax.oss.driver.api.core.type.MapType;
 import com.datastax.oss.driver.api.core.type.SetType;
+import com.datastax.oss.driver.api.core.type.UserDefinedType;
 import com.datastax.oss.driver.api.core.type.codec.registry.MutableCodecRegistry;
 import com.datastax.oss.driver.api.querybuilder.QueryBuilder;
 import com.datastax.oss.driver.api.querybuilder.delete.DeleteSelection;
+import com.datastax.oss.driver.api.querybuilder.insert.Insert;
 import com.datastax.oss.driver.api.querybuilder.insert.InsertInto;
 import com.datastax.oss.driver.api.querybuilder.insert.RegularInsert;
 import com.datastax.oss.driver.api.querybuilder.relation.Relation;
@@ -53,43 +62,76 @@ import org.apache.nifi.annotation.documentation.Tags;
 import org.apache.nifi.annotation.lifecycle.OnDisabled;
 import org.apache.nifi.annotation.lifecycle.OnEnabled;
 import org.apache.nifi.avro.AvroTypeUtil;
+import org.apache.nifi.components.ConfigVerificationResult;
 import org.apache.nifi.components.PropertyDescriptor;
 import org.apache.nifi.components.PropertyValue;
 import org.apache.nifi.controller.AbstractControllerService;
 import org.apache.nifi.controller.ConfigurationContext;
+import org.apache.nifi.controller.VerifiableControllerService;
+import org.apache.nifi.logging.ComponentLog;
 import org.apache.nifi.processor.exception.ProcessException;
+import org.apache.nifi.record.path.FieldValue;
+import org.apache.nifi.record.path.RecordPathResult;
 import org.apache.nifi.serialization.record.MapRecord;
-import org.apache.nifi.serialization.record.RecordFieldType;
+import org.apache.nifi.serialization.record.Record;
 import org.apache.nifi.serialization.record.RecordSchema;
-import org.apache.nifi.serialization.record.type.ArrayDataType;
+import org.apache.nifi.serialization.record.util.DataTypeUtils;
+import org.apache.nifi.service.cassandra.mapping.CassandraUdtSchemaMapper;
+import org.apache.nifi.service.cassandra.mapping.CharacterCodec;
+import org.apache.nifi.service.cassandra.mapping.FlexibleBigIntCodec;
+import org.apache.nifi.service.cassandra.mapping.FlexibleBooleanCodec;
 import org.apache.nifi.service.cassandra.mapping.FlexibleCounterCodec;
+import org.apache.nifi.service.cassandra.mapping.FlexibleDateCodec;
+import org.apache.nifi.service.cassandra.mapping.FlexibleDoubleCodec;
+import org.apache.nifi.service.cassandra.mapping.FlexibleFloatCodec;
+import org.apache.nifi.service.cassandra.mapping.FlexibleIntCodec;
+import org.apache.nifi.service.cassandra.mapping.FlexibleSmallIntCodec;
+import org.apache.nifi.service.cassandra.mapping.FlexibleTimeCodec;
+import org.apache.nifi.service.cassandra.mapping.FlexibleTinyIntCodec;
+import org.apache.nifi.service.cassandra.mapping.JavaSQLDateCodec;
+import org.apache.nifi.service.cassandra.mapping.JavaSQLTimeCodec;
 import org.apache.nifi.service.cassandra.mapping.JavaSQLTimestampCodec;
 import org.apache.nifi.service.cql.api.CQLExecutionService;
-import org.apache.nifi.service.cql.api.CQLFieldInfo;
 import org.apache.nifi.service.cql.api.CQLQueryCallback;
+import org.apache.nifi.service.cql.api.CqlBatchType;
+import org.apache.nifi.service.cql.api.QueryOverrides;
 import org.apache.nifi.service.cql.api.UpdateMethod;
+import org.apache.nifi.service.cql.api.WriteOverrides;
 import org.apache.nifi.service.cql.api.exception.QueryFailureException;
+import org.apache.nifi.record.path.RecordPath;
+import org.apache.nifi.service.cql.api.metadata.PrimaryKey;
+import org.apache.nifi.service.cql.api.metadata.PrimaryKeyFieldType;
+import org.apache.nifi.service.cql.api.metadata.PrimaryKeyIdentifier;
+import org.apache.nifi.service.cql.api.metadata.PrimaryKeyMetadata;
+import org.apache.nifi.service.cql.api.metadata.QualifiedTableName;
 import org.apache.nifi.ssl.SSLContextService;
 
-import javax.net.ssl.SSLContext;
+import java.io.File;
 import java.net.InetSocketAddress;
-import java.nio.ByteBuffer;
 import java.time.Duration;
-import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.HashMap;
-import java.util.Iterator;
-import java.util.List;
-import java.util.Map;
+import java.time.Instant;
+import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Function;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
+import javax.net.ssl.SSLContext;
 
-import static com.datastax.oss.driver.api.core.type.DataTypes.ASCII;
+import static org.bouncycastle.oer.its.ieee1609dot2.CertificateId.name;
+
 
 @Tags({"cassandra", "dbcp", "database", "connection", "pooling"})
 @CapabilityDescription("Provides connection session for Cassandra processors to work with Apache Cassandra.")
-public class CassandraCQLExecutionService extends AbstractControllerService implements CQLExecutionService {
+public class CassandraCQLExecutionService extends AbstractControllerService implements CQLExecutionService, VerifiableControllerService {
 
     public static final int DEFAULT_CASSANDRA_PORT = 9042;
+
+    /**
+     * Bind marker name for an explicit per-record write timestamp (see {@link WriteOverrides#timestampField()}).
+     * Namespaced to make an accidental collision with a real column name effectively impossible.
+     */
+    private static final String WRITE_TIMESTAMP_BIND_MARKER = "nifi_write_timestamp";
 
     // Common descriptors
 
@@ -97,8 +139,9 @@ public class CassandraCQLExecutionService extends AbstractControllerService impl
 
     private Map<String, PreparedStatement> statementCache;
 
-    private String keyspace;
     private int pageSize;
+
+    private Duration defaultTtl;
 
     public static final List<PropertyDescriptor> PROPERTY_DESCRIPTORS = List.of(
             CONTACT_POINTS,
@@ -112,7 +155,9 @@ public class CassandraCQLExecutionService extends AbstractControllerService impl
             READ_TIMEOUT,
             CONNECT_TIMEOUT,
             CONSISTENCY_LEVEL,
-            COMPRESSION_TYPE
+            COMPRESSION_TYPE,
+            DEFAULT_TTL,
+            DRIVER_CONFIGURATION_FILE
     );
 
     @Override
@@ -122,6 +167,7 @@ public class CassandraCQLExecutionService extends AbstractControllerService impl
 
     @OnEnabled
     public void onEnabled(final ConfigurationContext context) {
+        tableMetadataCache = new ConcurrentHashMap<>();
         connectToCassandra(context);
     }
 
@@ -133,76 +179,201 @@ public class CassandraCQLExecutionService extends AbstractControllerService impl
         }
     }
 
+    private Map<QualifiedTableName, PrimaryKey> tableMetadataCache;
+    private String defaultKeyspace;
+
+    /**
+     * Fills in the connection's default keyspace for an unqualified table name, mirroring what the driver
+     * session itself already does implicitly for query-builder statements built without an explicit
+     * keyspace. Metadata lookups have no such implicit fallback - {@code Metadata.getKeyspace(...)} needs a
+     * real keyspace name - so this makes that resolution explicit wherever a {@link QualifiedTableName} is
+     * used to look up table metadata rather than just to build a statement.
+     */
+    private QualifiedTableName resolveKeyspace(QualifiedTableName table) {
+        return table.isQualified() ? table : new QualifiedTableName(defaultKeyspace, table.table());
+    }
+
     private void connectToCassandra(ConfigurationContext context) {
         if (cassandraSession == null) {
             this.pageSize = context.getProperty(FETCH_SIZE).evaluateAttributeExpressions().asInteger();
 
-            final String consistencyLevel = context.getProperty(CONSISTENCY_LEVEL).getValue();
-            final String compression = context.getProperty(COMPRESSION_TYPE).getValue();
-            final String contactPointList = context.getProperty(CONTACT_POINTS).evaluateAttributeExpressions().getValue();
+            final PropertyValue defaultTtlProperty = context.getProperty(DEFAULT_TTL).evaluateAttributeExpressions();
+            this.defaultTtl = defaultTtlProperty.isSet() ? defaultTtlProperty.asDuration() : null;
 
-            List<InetSocketAddress> contactPoints = getContactPoints(contactPointList);
-
-            // Set up the client for secure (SSL/TLS communications) if configured to do so
-            final SSLContextService sslService =
-                    context.getProperty(PROP_SSL_CONTEXT_SERVICE).asControllerService(SSLContextService.class);
-            final SSLContext sslContext;
-
-            if (sslService == null) {
-                sslContext = null;
-            } else {
-                sslContext = sslService.createContext();
-            }
-
-            final String username, password;
-            PropertyValue usernameProperty = context.getProperty(USERNAME).evaluateAttributeExpressions();
-            PropertyValue passwordProperty = context.getProperty(PASSWORD).evaluateAttributeExpressions();
-
-            if (usernameProperty != null && passwordProperty != null) {
-                username = usernameProperty.getValue();
-                password = passwordProperty.getValue();
-            } else {
-                username = null;
-                password = null;
-            }
-
-            final Duration readTimeout = context.getProperty(READ_TIMEOUT).evaluateAttributeExpressions().asDuration();
-            final Duration connectTimeout = context.getProperty(CONNECT_TIMEOUT).evaluateAttributeExpressions().asDuration();
-
-            final String datacenter = context.getProperty(DATACENTER).evaluateAttributeExpressions().getValue();
-
-            keyspace = context.getProperty(KEYSPACE).isSet() ? context.getProperty(KEYSPACE).evaluateAttributeExpressions().getValue() : null;
-
-            DriverConfigLoader loader =
-                    DriverConfigLoader.programmaticBuilder()
-                            .withDuration(DefaultDriverOption.CONNECTION_CONNECT_TIMEOUT, connectTimeout)
-                            .withDuration(DefaultDriverOption.REQUEST_TIMEOUT, readTimeout)
-                            .withString(DefaultDriverOption.REQUEST_CONSISTENCY, consistencyLevel)
-                            .withString(DefaultDriverOption.PROTOCOL_COMPRESSION, compression)
-                            .build();
-
-            CqlSessionBuilder builder = CqlSession.builder()
-                    .addContactPoints(contactPoints);
-            if (StringUtils.isNotBlank(username) && StringUtils.isNotBlank(password)) {
-                    builder = builder.withAuthCredentials(username, password);
-            }
-
-            final CqlSession cqlSession = builder
-                    .withSslContext(sslContext)
-                    .withLocalDatacenter(datacenter)
-                    .withKeyspace(keyspace)
-                    .withConfigLoader(loader)
-                    .build();
+            final CqlSession cqlSession = buildSession(context);
 
             MutableCodecRegistry codecRegistry =
                     (MutableCodecRegistry) cqlSession.getContext().getCodecRegistry();
 
             codecRegistry.register(new JavaSQLTimestampCodec());
+            codecRegistry.register(new JavaSQLDateCodec());
+            codecRegistry.register(new JavaSQLTimeCodec());
+            codecRegistry.register(new CharacterCodec());
             codecRegistry.register(new FlexibleCounterCodec());
+            codecRegistry.register(new FlexibleBooleanCodec());
+            codecRegistry.register(new FlexibleTinyIntCodec());
+            codecRegistry.register(new FlexibleSmallIntCodec());
+            codecRegistry.register(new FlexibleIntCodec());
+            codecRegistry.register(new FlexibleBigIntCodec());
+            codecRegistry.register(new FlexibleFloatCodec());
+            codecRegistry.register(new FlexibleDoubleCodec());
+            codecRegistry.register(new FlexibleDateCodec());
+            codecRegistry.register(new FlexibleTimeCodec());
 
             // Create the cluster and connect to it
             cassandraSession = cqlSession;
         }
+    }
+
+    private CqlSession buildSession(final ConfigurationContext context) {
+        final String consistencyLevel = context.getProperty(CONSISTENCY_LEVEL).getValue();
+        final String compression = context.getProperty(COMPRESSION_TYPE).getValue();
+        final String contactPointList = context.getProperty(CONTACT_POINTS).evaluateAttributeExpressions().getValue();
+
+        List<InetSocketAddress> contactPoints = getContactPoints(contactPointList);
+
+        // Set up the client for secure (SSL/TLS communications) if configured to do so
+        final SSLContextService sslService =
+                context.getProperty(PROP_SSL_CONTEXT_SERVICE).asControllerService(SSLContextService.class);
+        final SSLContext sslContext;
+
+        if (sslService == null) {
+            sslContext = null;
+        } else {
+            sslContext = sslService.createContext();
+        }
+
+        final String username;
+        final String password;
+        PropertyValue usernameProperty = context.getProperty(USERNAME).evaluateAttributeExpressions();
+        PropertyValue passwordProperty = context.getProperty(PASSWORD).evaluateAttributeExpressions();
+
+        if (usernameProperty != null && passwordProperty != null) {
+            username = usernameProperty.getValue();
+            password = passwordProperty.getValue();
+        } else {
+            username = null;
+            password = null;
+        }
+
+        final Duration readTimeout = context.getProperty(READ_TIMEOUT).evaluateAttributeExpressions().asDuration();
+        final Duration connectTimeout = context.getProperty(CONNECT_TIMEOUT).evaluateAttributeExpressions().asDuration();
+
+        final String datacenter = context.getProperty(DATACENTER).evaluateAttributeExpressions().getValue();
+
+        final String sessionKeyspace = context.getProperty(KEYSPACE).evaluateAttributeExpressions().getValue();
+        this.defaultKeyspace = sessionKeyspace;
+
+        final DriverConfigLoader propertyBasedLoader =
+                DriverConfigLoader.programmaticBuilder()
+                        .withDuration(DefaultDriverOption.CONNECTION_CONNECT_TIMEOUT, connectTimeout)
+                        .withDuration(DefaultDriverOption.REQUEST_TIMEOUT, readTimeout)
+                        .withString(DefaultDriverOption.REQUEST_CONSISTENCY, consistencyLevel)
+                        .withString(DefaultDriverOption.PROTOCOL_COMPRESSION, compression)
+                        .build();
+
+        final DriverConfigLoader loader = buildConfigLoader(context, propertyBasedLoader);
+
+        CqlSessionBuilder builder = CqlSession.builder()
+                .addContactPoints(contactPoints);
+
+        if (StringUtils.isNotBlank(username) && StringUtils.isNotBlank(password)) {
+            builder = builder.withAuthCredentials(username, password);
+        }
+
+        return builder
+                .withSslContext(sslContext)
+                .withLocalDatacenter(datacenter)
+                .withKeyspace(sessionKeyspace)
+                .withConfigLoader(loader)
+                .build();
+    }
+
+    /**
+     * Builds the {@link DriverConfigLoader} used to open the session. When a Driver Configuration File is
+     * configured, it is composed as the primary source ahead of {@code propertyBasedLoader}, so any option
+     * defined in the file overrides the corresponding connection property, while options absent from the
+     * file still fall back to the property-derived configuration. The file uses the driver's standard
+     * typesafe-config format, which the ScyllaDB Java Driver reads identically, so this method requires no
+     * override for ScyllaDB compatibility.
+     */
+    protected DriverConfigLoader buildConfigLoader(final ConfigurationContext context, final DriverConfigLoader propertyBasedLoader) {
+        final PropertyValue configFileProperty = context.getProperty(DRIVER_CONFIGURATION_FILE);
+
+        if (configFileProperty == null || !configFileProperty.isSet()) {
+            return propertyBasedLoader;
+        }
+
+        final String configFilePath = configFileProperty.evaluateAttributeExpressions().getValue();
+        final DriverConfigLoader fileBasedLoader = DriverConfigLoader.fromFile(new File(configFilePath));
+
+        return DriverConfigLoader.compose(fileBasedLoader, propertyBasedLoader);
+    }
+
+    @Override
+    public List<ConfigVerificationResult> verify(final ConfigurationContext context, final ComponentLog verificationLogger, final Map<String, String> variables) {
+        final List<ConfigVerificationResult> results = new ArrayList<>();
+
+        final String datacenter = context.getProperty(DATACENTER).evaluateAttributeExpressions().getValue();
+
+        CqlSession session = null;
+        try {
+            session = buildSession(context);
+            results.add(new ConfigVerificationResult.Builder()
+                    .verificationStepName("Establish Connection")
+                    .outcome(ConfigVerificationResult.Outcome.SUCCESSFUL)
+                    .explanation("Successfully connected to Cassandra using datacenter [" + datacenter + "]")
+                    .build());
+        } catch (final Exception e) {
+            verificationLogger.warn("Failed to establish Cassandra connection using datacenter [{}]: {}", datacenter, e.getMessage());
+            results.add(new ConfigVerificationResult.Builder()
+                    .verificationStepName("Establish Connection")
+                    .outcome(ConfigVerificationResult.Outcome.FAILED)
+                    .explanation("Failed to connect using datacenter [" + datacenter + "]: " + e.getMessage())
+                    .build());
+        }
+
+        if (session != null) {
+            try {
+                // CqlSessionBuilder.build() succeeds even when no node belongs to the configured local
+                // datacenter: the driver only filters nodes by datacenter when computing a query plan for
+                // an actual request. Executing a trivial statement here forces that node selection so a
+                // bad datacenter name is caught during verification instead of on first real query.
+                try {
+                    session.execute("SELECT release_version FROM system.local");
+                    results.add(new ConfigVerificationResult.Builder()
+                            .verificationStepName("Verify Datacenter")
+                            .outcome(ConfigVerificationResult.Outcome.SUCCESSFUL)
+                            .explanation("Found an available node in datacenter [" + datacenter + "]")
+                            .build());
+                } catch (final Exception e) {
+                    verificationLogger.warn("No available node found in datacenter [{}]: {}", datacenter, e.getMessage());
+                    results.add(new ConfigVerificationResult.Builder()
+                            .verificationStepName("Verify Datacenter")
+                            .outcome(ConfigVerificationResult.Outcome.FAILED)
+                            .explanation("No available node found in datacenter [" + datacenter + "]: " + e.getMessage())
+                            .build());
+                }
+
+                final String keyspaceName = context.getProperty(KEYSPACE).isSet()
+                        ? context.getProperty(KEYSPACE).evaluateAttributeExpressions().getValue() : null;
+
+                if (StringUtils.isNotBlank(keyspaceName)) {
+                    final boolean keyspaceFound = session.getMetadata().getKeyspace(keyspaceName).isPresent();
+                    results.add(new ConfigVerificationResult.Builder()
+                            .verificationStepName("Verify Keyspace")
+                            .outcome(keyspaceFound ? ConfigVerificationResult.Outcome.SUCCESSFUL : ConfigVerificationResult.Outcome.FAILED)
+                            .explanation(keyspaceFound
+                                    ? "Found keyspace [" + keyspaceName + "]"
+                                    : "Keyspace [" + keyspaceName + "] was not found in the cluster")
+                            .build());
+                }
+            } finally {
+                session.close();
+            }
+        }
+
+        return results;
     }
 
     private List<InetSocketAddress> getContactPoints(String contactPointList) {
@@ -225,101 +396,175 @@ public class CassandraCQLExecutionService extends AbstractControllerService impl
         return contactPoints;
     }
 
-    @Override
-    public void query(String cql, boolean cacheStatement, List parameters, CQLQueryCallback callback) throws QueryFailureException {
-        SimpleStatement statement = SimpleStatement.builder(cql)
-                .setPageSize(pageSize).build();
-        PreparedStatement preparedStatement = cassandraSession.prepare(statement);
+    private void cacheMetadata(QualifiedTableName table) {
+        final QualifiedTableName resolved = resolveKeyspace(table);
+        getLogger().debug("Fetching metadata for {}.{}", resolved.keyspace(), resolved.table());
 
-
-        //TODO: cache
-        BoundStatement boundStatement = parameters != null && !parameters.isEmpty()
-                ? preparedStatement.bind(parameters.toArray()) : preparedStatement.bind();
-        ResultSet results = cassandraSession.execute(boundStatement);
-
-        Iterator<Row> resultsIterator = results.iterator();
-        long rowNumber = 0;
-
-        List<CQLFieldInfo> columnDefinitions = new ArrayList<>();
-        AtomicReference<RecordSchema> schemaReference = new AtomicReference<>();
-
-        try {
-            while (resultsIterator.hasNext()) {
-                try {
-                    Row row = resultsIterator.next();
-
-                    if (schemaReference.get() == null) {
-                        Schema generatedAvroSchema = createSchema(results);
-                        RecordSchema converted = AvroTypeUtil.createSchema(generatedAvroSchema);
-                        schemaReference.set(converted);
-                    }
-
-                    if (columnDefinitions.isEmpty()) {
-                        row.getColumnDefinitions().forEach(def -> {
-                            CQLFieldInfo info = new CQLFieldInfo(def.getName().toString(),
-                                    def.getType().toString(), def.getType().getProtocolCode());
-                            columnDefinitions.add(info);
-                        });
-                    }
-
-                    Map<String, Object> resultMap = new HashMap<>();
-
-                    for (int x = 0; x < columnDefinitions.size(); x++) {
-                        resultMap.put(columnDefinitions.get(x).getFieldName(), row.getObject(x));
-                    }
-
-                    MapRecord record = new MapRecord(schemaReference.get(), resultMap);
-
-                    callback.receive(++rowNumber, record, columnDefinitions, resultsIterator.hasNext());
-                } catch (Exception ex) {
-                    throw new ProcessException("Error querying CQL", ex);
-                }
+        if (!tableMetadataCache.containsKey(resolved)) {
+            getLogger().debug("Metadata for {}.{} not found, fetching from cluster.", resolved.keyspace(), resolved.table());
+            Optional<KeyspaceMetadata> keyspaceOpt = cassandraSession.getMetadata()
+                    .getKeyspace(resolved.keyspace());
+            if (keyspaceOpt.isEmpty()) {
+                throw new RuntimeException("Empty keyspace metadata");
             }
-        } catch (QueryExecutionException qee) {
-            getLogger().error("Error executing query", qee);
-            throw new QueryFailureException();
+
+            KeyspaceMetadata keyspaceMetadata = keyspaceOpt.get();
+            Optional<TableMetadata> tableOpt = keyspaceMetadata.getTable(resolved.table());
+            if (tableOpt.isEmpty()) {
+                throw new RuntimeException("Empty table metadata");
+            }
+
+            TableMetadata metadata = tableOpt.get();
+            PrimaryKey tableInfo = convertTableMetadata(metadata);
+
+            tableMetadataCache.put(resolved, tableInfo);
+            getLogger().debug("Metadata fetched and cached for {}.{}", resolved.keyspace(), resolved.table());
         }
     }
 
-    protected GeneratedResult generateInsert(String cassandraTable, RecordSchema schema, Map<String, Object> recordContentMap) {
-        InsertInto insertQuery;
-        List<String> keys = new ArrayList<>();
+    private PrimaryKey convertTableMetadata(TableMetadata metadata) {
+        List<PrimaryKeyMetadata> partitions = new ArrayList<>();
+        List<PrimaryKeyMetadata> clustering = new ArrayList<>();
 
-        if (cassandraTable.contains(".")) {
-            String[] keyspaceAndTable = cassandraTable.split("\\.");
-            insertQuery = QueryBuilder.insertInto(keyspaceAndTable[0], keyspaceAndTable[1]);
-        } else {
-            insertQuery = QueryBuilder.insertInto(cassandraTable);
+        int loc = 0;
+        for (ColumnMetadata m : metadata.getPartitionKey()) {
+            partitions.add(new PrimaryKeyMetadata(m.getName().asInternal(), loc++, PrimaryKeyFieldType.PARTITION));
         }
 
+        loc = 0;
+        for (ColumnMetadata m : metadata.getClusteringColumns().keySet()) {
+            clustering.add(new PrimaryKeyMetadata(m.getName().asInternal(), loc++, PrimaryKeyFieldType.CLUSTERING));
+        }
+
+        return new PrimaryKey(partitions, clustering);
+    }
+
+    @Override
+    public void query(String cql, boolean cacheStatement, List parameters, CQLQueryCallback callback, QueryOverrides overrides) throws QueryFailureException {
+        SimpleStatementBuilder statementBuilder = SimpleStatement.builder(cql)
+                .setPageSize(resolveFetchSize(overrides, pageSize));
+
+        final Duration timeoutOverride = resolveTimeoutOverride(overrides);
+        if (timeoutOverride != null) {
+            statementBuilder = statementBuilder.setTimeout(timeoutOverride);
+        }
+
+        SimpleStatement statement = statementBuilder.build();
+        PreparedStatement preparedStatement = cassandraSession.prepare(statement);
+
+        BoundStatement boundStatement = parameters != null && !parameters.isEmpty()
+                ? preparedStatement.bind(parameters.toArray()) : preparedStatement.bind();
+
+        AtomicReference<RecordSchema> schemaReference = new AtomicReference<>();
+
+        // The whole lifecycle of the query - the initial execute() as well as every page fetch triggered by
+        // hasNext()/next() as the ResultSet is iterated - can surface a QueryExecutionException, so all of it
+        // is covered by one try, rather than only the page-fetch calls.
+        try {
+            ResultSet results = cassandraSession.execute(boundStatement);
+            Iterator<Row> resultsIterator = results.iterator();
+            long rowNumber = 0;
+
+            List<String> columnNames = new ArrayList<>();
+
+            while (resultsIterator.hasNext()) {
+                Row row = resultsIterator.next();
+
+                if (schemaReference.get() == null) {
+                    Schema generatedAvroSchema = createSchema(results);
+                    RecordSchema converted = AvroTypeUtil.createSchema(generatedAvroSchema);
+                    schemaReference.set(converted);
+                }
+
+                if (columnNames.isEmpty()) {
+                    row.getColumnDefinitions().forEach(def -> {
+                        columnNames.add(def.getName().toString());
+                    });
+                }
+
+                Map<String, Object> resultMap = new HashMap<>();
+
+                for (int x = 0; x < columnNames.size(); x++) {
+                    resultMap.put(columnNames.get(x), row.getObject(x));
+                }
+
+                MapRecord record = new MapRecord(schemaReference.get(), resultMap);
+
+                callback.receive(++rowNumber, record, resultsIterator.hasNext());
+            }
+        } catch (QueryExecutionException | AllNodesFailedException qee) {
+            getLogger().error("Error executing query", qee);
+            throw new QueryFailureException();
+        } catch (Exception ex) {
+            throw new ProcessException("Error querying CQL", ex);
+        }
+    }
+
+    static int resolveFetchSize(final QueryOverrides overrides, final int defaultFetchSize) {
+        return overrides != null && overrides.fetchSize() != null ? overrides.fetchSize() : defaultFetchSize;
+    }
+
+    static Duration resolveTimeoutOverride(final QueryOverrides overrides) {
+        return overrides != null ? overrides.timeout() : null;
+    }
+
+    static BatchType toDriverBatchType(final CqlBatchType batchType) {
+        return switch (batchType) {
+            case LOGGED -> BatchType.LOGGED;
+            case UNLOGGED -> BatchType.UNLOGGED;
+            case COUNTER -> BatchType.COUNTER;
+        };
+    }
+
+    /**
+     * @return the TTL to apply in seconds, or {@code null} if none applies. {@code Integer} (not {@code int}) so
+     * "no TTL" can be represented distinctly from "a TTL of zero seconds" (which Cassandra treats as an explicit
+     * request to clear any table-level default TTL).
+     */
+    static Integer resolveTtlSeconds(final WriteOverrides overrides, final Duration defaultTtl) {
+        final Duration ttl = overrides != null && overrides.ttl() != null ? overrides.ttl() : defaultTtl;
+        return ttl != null ? Math.toIntExact(ttl.toSeconds()) : null;
+    }
+
+    /**
+     * There's no connection-service-level default for this one (unlike TTL): which field holds a record's own
+     * event time is a property of the schema being written, not the connection, so it only ever comes from a
+     * per-call override.
+     */
+    static boolean hasTimestampOverride(final WriteOverrides overrides) {
+        return overrides != null && overrides.timestampField() != null;
+    }
+
+    /**
+     * Converts a record field's value into epoch microseconds, the unit Cassandra/ScyllaDB expect for an
+     * explicit write timestamp (distinct from the millisecond precision of the CQL {@code timestamp} type).
+     */
+    static long toEpochMicros(final Object value) {
+        final Instant instant;
+        if (value instanceof Instant instantValue) {
+            instant = instantValue;
+        } else if (value instanceof java.util.Date dateValue) {
+            instant = dateValue.toInstant();
+        } else if (value instanceof Number numberValue) {
+            instant = Instant.ofEpochMilli(numberValue.longValue());
+        } else {
+            throw new IllegalArgumentException("Cannot derive a write timestamp from a value of type "
+                    + (value == null ? "null" : value.getClass().getName()));
+        }
+
+        return instant.getEpochSecond() * 1_000_000L + instant.getNano() / 1_000L;
+    }
+
+    protected GeneratedResult generateInsert(QualifiedTableName table, RecordSchema schema,
+                                              Map<PrimaryKeyIdentifier, RecordPath> primaryKeyOverrides,
+                                              Integer ttlSeconds, boolean includeTimestampMarker) {
+        InsertInto insertQuery = table.isQualified()
+                ? QueryBuilder.insertInto(table.keyspace(), table.table())
+                : QueryBuilder.insertInto(table.table());
+        List<String> keys = new ArrayList<>();
+
         RegularInsert regularInsert = null;
-        for (String fieldName : schema.getFieldNames()) {
-            Object value = recordContentMap.get(fieldName);
-
-            if (value != null && value.getClass().isArray()) {
-                Object[] array = (Object[]) value;
-
-                if (array.length > 0) {
-                    if (array[0] instanceof Byte) {
-                        Object[] temp = (Object[]) value;
-                        byte[] newArray = new byte[temp.length];
-                        for (int x = 0; x < temp.length; x++) {
-                            newArray[x] = (Byte) temp[x];
-                        }
-                        value = ByteBuffer.wrap(newArray);
-                    }
-                }
-            }
-
-            if (schema.getDataType(fieldName).isPresent()) {
-                org.apache.nifi.serialization.record.DataType fieldDataType = schema.getDataType(fieldName).get();
-                if (fieldDataType.getFieldType() == RecordFieldType.ARRAY) {
-                    if (((ArrayDataType) fieldDataType).getElementType().getFieldType() == RecordFieldType.STRING) {
-                        value = Arrays.stream((Object[]) value).toArray(String[]::new);
-                    }
-                }
-            }
-
+        for (String fieldName : columnNamesIncludingOverrideOnly(table, schema, primaryKeyOverrides)) {
             if (regularInsert == null) {
                 regularInsert = insertQuery.value(fieldName, QueryBuilder.bindMarker(fieldName));
             } else {
@@ -333,38 +578,106 @@ public class CassandraCQLExecutionService extends AbstractControllerService impl
             throw new ProcessException("Could not build an insert statement from the supplied record");
         }
 
-        return new GeneratedResult(regularInsert.build(), keys);
+        Insert insert = regularInsert;
+        if (ttlSeconds != null) {
+            insert = insert.usingTtl(ttlSeconds);
+        }
+        if (includeTimestampMarker) {
+            // A separate named bind marker (set by name on the bound statement, not part of "keys") rather than
+            // a literal, since - unlike TTL - each record in a batch can carry a different write timestamp.
+            insert = insert.usingTimestamp(QueryBuilder.bindMarker(WRITE_TIMESTAMP_BIND_MARKER));
+        }
+
+        return new GeneratedResult(insert.build(), keys);
+    }
+
+    /**
+     * Every schema field, in schema order, followed by any primary key override target column for this table
+     * that has no same-named schema field. Without this, a column whose value is only ever supplied by a
+     * primary key override - never by a record field of the same name, such as a {@code date} column derived
+     * from a {@code timestamp} field via a {@code format()} RecordPath override - would never get a bind
+     * marker in the generated statement at all, and the write would fail (or silently omit that column)
+     * regardless of what the override itself evaluates to.
+     */
+    private List<String> columnNamesIncludingOverrideOnly(QualifiedTableName table, RecordSchema schema,
+                                                            Map<PrimaryKeyIdentifier, RecordPath> primaryKeyOverrides) {
+        final List<String> columnNames = new ArrayList<>(schema.getFieldNames());
+        for (String overrideFieldName : overrideFieldNamesForTable(table, primaryKeyOverrides)) {
+            if (!columnNames.contains(overrideFieldName)) {
+                columnNames.add(overrideFieldName);
+            }
+        }
+        return columnNames;
+    }
+
+    /**
+     * The field names of every primary key override configured for this specific table, resolving an
+     * unqualified {@code table} against {@link #defaultKeyspace} the same way {@link #getRecordPathOverride}
+     * does.
+     */
+    private Set<String> overrideFieldNamesForTable(QualifiedTableName table, Map<PrimaryKeyIdentifier, RecordPath> primaryKeyOverrides) {
+        final QualifiedTableName resolved = resolveKeyspace(table);
+        return primaryKeyOverrides.keySet().stream()
+                .filter(identifier -> identifier.keyspace().equals(resolved.keyspace()) && identifier.tableName().equals(resolved.table()))
+                .map(PrimaryKeyIdentifier::fieldName)
+                .collect(Collectors.toCollection(LinkedHashSet::new));
     }
 
     @Override
-    public void insert(String table, org.apache.nifi.serialization.record.Record record) {
-        GeneratedResult result = generateInsert(table, record.getSchema(), ((MapRecord) record).toMap(true));
+    public void insert(QualifiedTableName table, org.apache.nifi.serialization.record.Record record, Map<PrimaryKeyIdentifier, RecordPath> primaryKeyOverrides,
+                        WriteOverrides overrides) throws QueryFailureException {
+        final boolean useTimestampOverride = hasTimestampOverride(overrides);
+        GeneratedResult result = generateInsert(table, record.getSchema(), primaryKeyOverrides, resolveTtlSeconds(overrides, defaultTtl), useTimestampOverride);
         PreparedStatement preparedStatement = cassandraSession.prepare(result.statement);
 
-        BoundStatement boundStatement = preparedStatement.bind(getBindValues(record, result.keysUsed));
+        Object[] values = getBindValues(table, primaryKeyOverrides, record, preparedStatement, result.keysUsed);
+        if (useTimestampOverride) {
+            setTimestampBindValue(values, preparedStatement, record, overrides);
+        }
+        BoundStatement boundStatement = preparedStatement.bind(values);
 
-        cassandraSession.execute(boundStatement);
+        try {
+            cassandraSession.execute(boundStatement);
+        } catch (QueryExecutionException | AllNodesFailedException qee) {
+            getLogger().error("Error executing insert", qee);
+            throw new QueryFailureException();
+        }
     }
 
     @Override
-    public void insert(String table, List<org.apache.nifi.serialization.record.Record> records) {
+    public void insert(QualifiedTableName table, List<org.apache.nifi.serialization.record.Record> records, Map<PrimaryKeyIdentifier, RecordPath> primaryKeyOverrides,
+                        CqlBatchType batchType, WriteOverrides overrides) throws QueryFailureException {
         if (records == null || records.isEmpty()) {
             return;
         }
 
-        BatchStatementBuilder builder = BatchStatement.builder(BatchType.LOGGED);
-        GeneratedResult result = generateInsert(table, records.get(0).getSchema(), ((MapRecord) records.get(0)).toMap(true));
+        final boolean useTimestampOverride = hasTimestampOverride(overrides);
+        BatchStatementBuilder builder = BatchStatement.builder(toDriverBatchType(batchType));
+        GeneratedResult result = generateInsert(table, records.get(0).getSchema(), primaryKeyOverrides, resolveTtlSeconds(overrides, defaultTtl), useTimestampOverride);
         PreparedStatement preparedStatement = cassandraSession.prepare(result.statement);
 
         for (org.apache.nifi.serialization.record.Record record : records) {
-            builder.addStatement(preparedStatement.bind(getBindValues(record, result.keysUsed)));
+            Object[] values = getBindValues(table, primaryKeyOverrides, record, preparedStatement, result.keysUsed);
+            if (useTimestampOverride) {
+                setTimestampBindValue(values, preparedStatement, record, overrides);
+            }
+            builder.addStatement(preparedStatement.bind(values));
         }
-        cassandraSession.execute(builder.build());
+
+        try {
+            cassandraSession.execute(builder.build());
+        } catch (QueryExecutionException | AllNodesFailedException qee) {
+            getLogger().error("Error executing batch insert", qee);
+            throw new QueryFailureException();
+        }
     }
 
     @Override
-    public String getTransitUrl(String tableName) {
-        return  "cassandra://" + cassandraSession.getMetadata().getClusterName() + "." + tableName;
+    public String getTransitUrl(QualifiedTableName tableName) {
+        final String qualifiedName = tableName.isQualified()
+                ? tableName.keyspace() + "." + tableName.table()
+                : tableName.table();
+        return  "cassandra://" + cassandraSession.getMetadata().getClusterName() + "." + qualifiedName;
     }
 
     /**
@@ -387,100 +700,23 @@ public class CassandraCQLExecutionService extends AbstractControllerService impl
 
         final SchemaBuilder.FieldAssembler<Schema> builder = SchemaBuilder.record(tableName).namespace("any.data").fields();
         if (columnDefinitions != null) {
+            final Map<String, Schema> udtSchemaCache = new HashMap<>();
             for (int i = 0; i < nrOfColumns; i++) {
-
                 DataType dataType = columnDefinitions.get(i).getType();
                 if (dataType == null) {
                     throw new IllegalArgumentException("No data type for column[" + i + "] with name "
                             + columnDefinitions.get(i).getName());
                 }
 
-                if (dataType instanceof ListType l) {
-                    builder.name(columnDefinitions.get(i).getName().toString()).type().unionOf().nullBuilder().endNull().and().array()
-                            .items(getUnionFieldType(getPrimitiveAvroTypeFromCassandraType(l.getElementType()))).endUnion().noDefault();
-                } else if (dataType instanceof SetType s) {
-                    builder.name(columnDefinitions.get(i).getName().toString()).type().unionOf().nullBuilder().endNull().and().array()
-                            .items(getUnionFieldType(getPrimitiveAvroTypeFromCassandraType(s.getElementType()))).endUnion().noDefault();
-                } else if (dataType instanceof MapType m) {
-                    builder.name(columnDefinitions.get(i).getName().toString()).type().unionOf().nullBuilder().endNull().and().map().values(
-                            getUnionFieldType(getPrimitiveAvroTypeFromCassandraType(m.getValueType()))).endUnion().noDefault();
-                } else {
-                    builder.name(columnDefinitions.get(i).getName().toString())
-                            .type(getUnionFieldType(getPrimitiveAvroTypeFromCassandraType(dataType))).noDefault();
-                }
+                builder.name(columnDefinitions.get(i).getName().toString())
+                        .type(CassandraUdtSchemaMapper.toAvroSchema(dataType, udtSchemaCache))
+                        .noDefault();
             }
         }
         return builder.endRecord();
     }
 
-    /**
-     * This method will create a schema a union field consisting of null and the specified type.
-     *
-     * @param dataType The data type of the field
-     */
-    protected static Schema getUnionFieldType(String dataType) {
-        return SchemaBuilder.builder().unionOf().nullBuilder().endNull().and().type(getSchemaForType(dataType)).endUnion();
-    }
-
-    /**
-     * This method will create an Avro schema for the specified type.
-     *
-     * @param dataType The data type of the field
-     */
-    protected static Schema getSchemaForType(final String dataType) {
-        final SchemaBuilder.TypeBuilder<Schema> typeBuilder = SchemaBuilder.builder();
-        final Schema returnSchema = switch (dataType) {
-            case "string" -> typeBuilder.stringType();
-            case "boolean" -> typeBuilder.booleanType();
-            case "int" -> typeBuilder.intType();
-            case "long" -> typeBuilder.longType();
-            case "float" -> typeBuilder.floatType();
-            case "double" -> typeBuilder.doubleType();
-            case "bytes" -> typeBuilder.bytesType();
-            default -> throw new IllegalArgumentException("Unknown Avro primitive type: " + dataType);
-        };
-        return returnSchema;
-    }
-
-    protected static String getPrimitiveAvroTypeFromCassandraType(final DataType dataType) {
-        // Map types from Cassandra to Avro where possible
-        if (dataType.equals(ASCII)
-                || dataType.equals(DataTypes.TEXT)
-                // Nonstandard types represented by this processor as a string
-                || dataType.equals(DataTypes.TIMESTAMP)
-                || dataType.equals(DataTypes.TIMEUUID)
-                || dataType.equals(DataTypes.UUID)
-                || dataType.equals(DataTypes.INET)
-                || dataType.equals(DataTypes.VARINT)) {
-            return "string";
-
-        } else if (dataType.equals(DataTypes.BOOLEAN)) {
-            return "boolean";
-
-        } else if (dataType.equals(DataTypes.INT)) {
-            return "int";
-
-        } else if (dataType.equals(DataTypes.BIGINT)
-                || dataType.equals(DataTypes.COUNTER)) {
-            return "long";
-
-        } else if (dataType.equals(DataTypes.FLOAT)) {
-            return "float";
-
-        } else if (dataType.equals(DataTypes.DOUBLE)) {
-            return "double";
-
-        } else if (dataType.equals(DataTypes.BLOB)) {
-            return "bytes";
-
-        } else {
-            throw new IllegalArgumentException("createSchema: Unknown Cassandra data type " + dataType
-                    + " cannot be converted to Avro type");
-        }
-    }
-
-    protected SimpleStatement generateDelete(String cassandraTable, org.apache.nifi.serialization.record.Record record, List<String> deleteKeyNames) {
-        DeleteSelection deleteSelection;
+    protected SimpleStatement generateDelete(QualifiedTableName cassandraTable, org.apache.nifi.serialization.record.Record record, List<String> deleteKeyNames) {
         RecordSchema schema = record.getSchema();
 
         // Split up the update key names separated by a comma, should not be empty
@@ -495,28 +731,21 @@ public class CassandraCQLExecutionService extends AbstractControllerService impl
             }
         }
 
-        if (cassandraTable.contains(".")) {
-            final String[] keyspaceAndTable = cassandraTable.split("\\.");
-            deleteSelection = QueryBuilder.deleteFrom(keyspaceAndTable[0], keyspaceAndTable[1]);
-        } else {
-            deleteSelection = QueryBuilder.deleteFrom(cassandraTable);
-        }
-
-        List<String> otherKeys = schema.getFieldNames().stream()
-                .filter(fieldName -> !deleteKeyNames.contains(fieldName))
-                .toList();
+        DeleteSelection deleteSelection = cassandraTable.isQualified()
+                ? QueryBuilder.deleteFrom(cassandraTable.keyspace(), cassandraTable.table())
+                : QueryBuilder.deleteFrom(cassandraTable.table());
 
         List<Relation> whereCriteria = new ArrayList<>();
 
-        for (String fieldName : otherKeys) {
-            whereCriteria.add(Relation.column("k").isEqualTo(QueryBuilder.bindMarker(fieldName)));
+        for (String fieldName : deleteKeyNames) {
+            whereCriteria.add(Relation.column(fieldName).isEqualTo(QueryBuilder.bindMarker(fieldName)));
         }
 
         return deleteSelection.where(whereCriteria).build();
     }
 
-    protected GeneratedResult generateUpdate(String cassandraTable, org.apache.nifi.serialization.record.Record record, List<String> updateKeyNames, UpdateMethod updateMethod) {
-        UpdateStart updateQueryStart;
+    protected GeneratedResult generateUpdate(QualifiedTableName cassandraTable, org.apache.nifi.serialization.record.Record record, Map<PrimaryKeyIdentifier, RecordPath> primaryKeyOverrides,
+                                              List<String> updateKeyNames, UpdateMethod updateMethod, Integer ttlSeconds, boolean includeTimestampMarker) {
         RecordSchema schema = record.getSchema();
 
         List<String> keysUsedInOrder = new ArrayList<>();
@@ -526,19 +755,29 @@ public class CassandraCQLExecutionService extends AbstractControllerService impl
             throw new IllegalArgumentException("No Update Keys were specified");
         }
 
-        // Verify if all update keys are present in the record
+        // Verify every update key is either a real record field or covered by a primary key override for
+        // this table - an update key with neither, such as a date column derived from a timestamp field via
+        // a format() RecordPath override, would otherwise be rejected here even though getBindValues can
+        // resolve its value perfectly well from the override alone.
+        final Set<String> overrideFieldNames = overrideFieldNamesForTable(cassandraTable, primaryKeyOverrides);
         for (String updateKey : updateKeyNames) {
-            if (!schema.getFieldNames().contains(updateKey)) {
+            if (!schema.getFieldNames().contains(updateKey) && !overrideFieldNames.contains(updateKey)) {
                 throw new IllegalArgumentException("Update key '" + updateKey + "' is not present in the record schema");
             }
         }
 
         // Prepare keyspace/table names
-        if (cassandraTable.contains(".")) {
-            String[] keyspaceAndTable = cassandraTable.split("\\.");
-            updateQueryStart = QueryBuilder.update(keyspaceAndTable[0], keyspaceAndTable[1]);
-        } else {
-            updateQueryStart = QueryBuilder.update(cassandraTable);
+        UpdateStart updateQueryStart = cassandraTable.isQualified()
+                ? QueryBuilder.update(cassandraTable.keyspace(), cassandraTable.table())
+                : QueryBuilder.update(cassandraTable.table());
+
+        // Cassandra/ScyllaDB do not support a TTL or a custom write timestamp on counter columns, so both are
+        // only applied for SET updates.
+        if (ttlSeconds != null && updateMethod == UpdateMethod.SET) {
+            updateQueryStart = updateQueryStart.usingTtl(ttlSeconds);
+        }
+        if (includeTimestampMarker && updateMethod == UpdateMethod.SET) {
+            updateQueryStart = updateQueryStart.usingTimestamp(QueryBuilder.bindMarker(WRITE_TIMESTAMP_BIND_MARKER));
         }
 
         UpdateWithAssignments updateAssignments = null;
@@ -580,46 +819,242 @@ public class CassandraCQLExecutionService extends AbstractControllerService impl
     }
 
     @Override
-    public void delete(String cassandraTable, org.apache.nifi.serialization.record.Record record, List<String> updateKeys) {
+    public void delete(QualifiedTableName cassandraTable, org.apache.nifi.serialization.record.Record record, Map<PrimaryKeyIdentifier, RecordPath> primaryKeyOverrides,
+                        List<String> updateKeys) throws QueryFailureException {
         Statement deleteStatement = generateDelete(cassandraTable, record, updateKeys);
-        cassandraSession.execute(deleteStatement);
+        try {
+            cassandraSession.execute(deleteStatement);
+        } catch (QueryExecutionException | AllNodesFailedException qee) {
+            getLogger().error("Error executing delete", qee);
+            throw new QueryFailureException();
+        }
     }
 
     @Override
-    public void update(String cassandraTable, org.apache.nifi.serialization.record.Record record, List<String> updateKeys, UpdateMethod updateMethod) {
-        GeneratedResult result = generateUpdate(cassandraTable, record, updateKeys, updateMethod);
+    public void update(QualifiedTableName cassandraTable, org.apache.nifi.serialization.record.Record record, Map<PrimaryKeyIdentifier, RecordPath> primaryKeyOverrides,
+                        List<String> updateKeys, UpdateMethod updateMethod, WriteOverrides overrides) throws QueryFailureException {
+        final boolean useTimestampOverride = hasTimestampOverride(overrides) && updateMethod == UpdateMethod.SET;
+        GeneratedResult result = generateUpdate(cassandraTable, record, primaryKeyOverrides, updateKeys, updateMethod, resolveTtlSeconds(overrides, defaultTtl), useTimestampOverride);
         PreparedStatement preparedStatement = cassandraSession.prepare(result.statement());
 
-        BoundStatement statement = preparedStatement.bind(getBindValues(record, result.keysUsed()));
+        Object[] values = getBindValues(cassandraTable, primaryKeyOverrides, record, preparedStatement, result.keysUsed());
+        if (useTimestampOverride) {
+            setTimestampBindValue(values, preparedStatement, record, overrides);
+        }
+        BoundStatement statement = preparedStatement.bind(values);
 
-        cassandraSession.execute(statement);
+        try {
+            cassandraSession.execute(statement);
+        } catch (QueryExecutionException | AllNodesFailedException qee) {
+            getLogger().error("Error executing update", qee);
+            throw new QueryFailureException();
+        }
     }
 
-    private Object[] getBindValues(org.apache.nifi.serialization.record.Record  record, List<String> keyNamesInOrder) {
-        Object[] result = new Object[keyNamesInOrder.size()];
+    /**
+     * Looks up each field's actual bind-marker position by name rather than assuming it matches
+     * {@code keyNamesInOrder}'s own list order. That assumption held as long as every bind marker in the
+     * statement corresponded 1:1 with an entry in {@code keyNamesInOrder} in the same order - which broke once
+     * {@link #WRITE_TIMESTAMP_BIND_MARKER} started being inserted into UPDATE statements ahead of the SET
+     * assignments (CQL requires {@code USING TIMESTAMP} immediately after the table name, before {@code SET}),
+     * shifting every real field's position by one. Any position not covered by {@code keyNamesInOrder} (such as
+     * that marker's) is left {@code null} here; callers that added such a marker are responsible for setting it
+     * themselves afterward, by name.
+     */
+    private Object[] getBindValues(QualifiedTableName qualifiedTableName,
+                                   Map<PrimaryKeyIdentifier, RecordPath> mappings,
+                                   org.apache.nifi.serialization.record.Record record,
+                                   PreparedStatement preparedStatement, List<String> keyNamesInOrder) {
+        ColumnDefinitions variableDefinitions = preparedStatement.getVariableDefinitions();
+        Object[] result = new Object[variableDefinitions.size()];
 
-        for (int i = 0; i < keyNamesInOrder.size(); i++) {
-            result[i] = record.getValue(keyNamesInOrder.get(i));
+        for (String fieldName : keyNamesInOrder) {
+            int index = variableDefinitions.firstIndexOf(fieldName);
+
+            RecordPath path = getRecordPathOverride(qualifiedTableName, fieldName, mappings);
+            Object value;
+            if (path != null) {
+                value = evaluateOverride(record, path);
+            } else {
+                value = record.getValue(fieldName);
+            }
+            DataType cqlType = variableDefinitions.get(index).getType();
+            result[index] = convertForCqlType(value, cqlType);
         }
 
         return result;
     }
 
+    private Object evaluateOverride(Record record, RecordPath path) {
+        RecordPathResult result = path.evaluate(record);
+        List<FieldValue> valueList = result.getSelectedFields().toList();
+
+        if (valueList.isEmpty()) {
+            throw new IllegalArgumentException(String.format("%s evaluated to no values.", path.getPath()));
+        } else if (valueList.size() > 1) {
+            throw new IllegalArgumentException(String.format("%s evaluated to more than one value.", path.getPath()));
+        }
+
+        return valueList.get(0).getValue();
+    }
+
+    private RecordPath getRecordPathOverride(QualifiedTableName tableName, String fieldName,
+                                          Map<PrimaryKeyIdentifier, RecordPath> overrides) {
+        final String cleanFieldName = CqlIdentifier.fromCql(fieldName).asInternal();
+        final String keyspace = tableName.isQualified() ? tableName.keyspace() : defaultKeyspace;
+
+        Optional<Map.Entry<PrimaryKeyIdentifier, RecordPath>> identifier = overrides
+                .entrySet()
+                .stream()
+                .filter((e) -> e.getKey().keyspace().equals(keyspace)
+                        && e.getKey().tableName().equals(tableName.table())
+                        && e.getKey().fieldName().equals(fieldName)
+                        && CqlIdentifier.fromCql(e.getKey().fieldName()).asInternal().equals(cleanFieldName))
+                .findFirst();
+
+        return identifier.map(Map.Entry::getValue).orElse(null);
+    }
+
+    /**
+     * Fills in the slot reserved for {@link #WRITE_TIMESTAMP_BIND_MARKER} directly in the same array used for
+     * the single {@link PreparedStatement#bind(Object...)} call, rather than binding it separately afterward via
+     * a named setter on the resulting {@link BoundStatement} - the latter looked correct but did not reliably
+     * take effect for UPDATE statements when verified against a real cluster.
+     */
+    private void setTimestampBindValue(Object[] values, PreparedStatement preparedStatement, org.apache.nifi.serialization.record.Record record, WriteOverrides overrides) {
+        int index = preparedStatement.getVariableDefinitions().firstIndexOf(WRITE_TIMESTAMP_BIND_MARKER);
+        values[index] = toEpochMicros(record.getValue(overrides.timestampField()));
+    }
+
+    /**
+     * Converts a nested {@code Record} or a raw {@code Map} value into a {@link UdtValue} when the target
+     * column is a Cassandra User Defined Type, recursing into any UDT-typed fields it contains (both are
+     * accepted since {@code DataTypeUtils#toRecord} treats them as equally valid representations of RECORD);
+     * converts each element of a {@code List}, {@code Set}, or {@code Object[]} value the same way when the
+     * target column is a Cassandra list or set (including a list/set of UDTs) - {@code Object[]} is accepted
+     * alongside {@code List}/{@code Set} since it's NiFi's own canonical ARRAY representation
+     * ({@code DataTypeUtils#toArray} always returns one); and converts each value of a {@code Map} value the
+     * same way when the target column is a Cassandra map (including a map with UDT values). For uuid and
+     * timeuuid columns, the value is normalized via {@link DataTypeUtils} so that a compatible but
+     * non-exact value - for example a {@code String} representation of a UUID - still binds correctly; for
+     * timeuuid specifically, the normalized UUID is also checked to be version 1 (time-based), since that's
+     * a hard requirement of the CQL type and failing here produces a clear, attributable error instead of
+     * the driver's own confusing {@code CodecNotFoundException} for a non-compliant value.
+     * CHAR and the remaining scalar types whose CQL type requires an exact Java type the driver's default
+     * codec won't coerce into (boolean and the numeric types) are not handled here: each has a
+     * {@code Flexible*Codec}/{@link org.apache.nifi.service.cassandra.mapping.CharacterCodec} registered
+     * with the session so a compatible but non-exact value binds directly. Every other value is passed
+     * through unchanged, since the driver's default codecs already handle it.
+     */
+    private Object convertForCqlType(final Object value, final DataType cqlType) {
+        if (value == null) {
+            return null;
+        }
+
+        // A RECORD-typed value is normally a nested Record, but DataTypeUtils#toRecord also accepts a raw Map
+        // as an equally valid representation, so both are converted into a UdtValue the same way here.
+        if (cqlType instanceof UserDefinedType udtType
+                && (value instanceof org.apache.nifi.serialization.record.Record || value instanceof Map<?, ?>)) {
+            final Function<String, Object> fieldValueLookup = value instanceof org.apache.nifi.serialization.record.Record nestedRecord
+                    ? nestedRecord::getValue
+                    : ((Map<?, ?>) value)::get;
+
+            UdtValue udtValue = udtType.newValue();
+            final List<String> fieldNames = udtType.getFieldNames().stream().map(name -> name.asInternal()).toList();
+
+            for (int i = 0; i < fieldNames.size(); i++) {
+                final String fieldName = fieldNames.get(i);
+                final DataType fieldCqlType = udtType.getFieldTypes().get(i);
+                final Object fieldValue = convertForCqlType(fieldValueLookup.apply(fieldName), fieldCqlType);
+                udtValue = udtValue.set(fieldName, fieldValue, (Class<Object>) (fieldValue == null ? Object.class : fieldValue.getClass()));
+            }
+
+            return udtValue;
+        }
+
+        // An ARRAY-typed value is normally a List, but Object[] is NiFi's own canonical representation
+        // (DataTypeUtils#toArray always returns one), so both are accepted here for list and set columns.
+        if (cqlType instanceof ListType listType && (value instanceof List<?> || value instanceof Object[])) {
+            final DataType elementCqlType = listType.getElementType();
+            return toElementStream(value).map(element -> convertForCqlType(element, elementCqlType)).toList();
+        }
+
+        if (cqlType instanceof SetType setType && (value instanceof Set<?> || value instanceof Object[])) {
+            final DataType elementCqlType = setType.getElementType();
+            return toElementStream(value).map(element -> convertForCqlType(element, elementCqlType)).collect(Collectors.toSet());
+        }
+
+        if (value instanceof Map<?, ?> map && cqlType instanceof MapType mapType) {
+            final DataType keyCqlType = mapType.getKeyType();
+            final DataType valueCqlType = mapType.getValueType();
+            final Map<Object, Object> converted = new HashMap<>();
+
+            for (final Map.Entry<?, ?> entry : map.entrySet()) {
+                converted.put(convertForCqlType(entry.getKey(), keyCqlType), convertForCqlType(entry.getValue(), valueCqlType));
+            }
+
+            return converted;
+        }
+
+        if (cqlType.equals(DataTypes.UUID)) {
+            return DataTypeUtils.toUUID(value);
+        }
+
+        // The driver's own codec already rejects a non-version-1 UUID bound to a timeuuid column, but only
+        // via a confusing CodecNotFoundException ("Codec not found for requested operation: [TIMEUUID <->
+        // java.util.UUID]") that reads like a driver/configuration problem rather than a data problem.
+        // Checking here instead produces a clear, attributable error before the value ever reaches bind().
+        if (cqlType.equals(DataTypes.TIMEUUID)) {
+            final UUID uuid = DataTypeUtils.toUUID(value);
+            if (uuid.version() != 1) {
+                throw new IllegalArgumentException(String.format(
+                        "Value '%s' is not a valid timeuuid: version %d, but timeuuid columns require a version 1 (time-based) UUID",
+                        uuid, uuid.version()));
+            }
+            return uuid;
+        }
+
+        return value;
+    }
+
+    private static Stream<?> toElementStream(final Object value) {
+        return (value instanceof Object[] array) ? Arrays.stream(array) : ((Collection<?>) value).stream();
+    }
+
     @Override
-    public void update(String cassandraTable, List<org.apache.nifi.serialization.record.Record> records, List<String> updateKeys, UpdateMethod updateMethod) {
+    public void update(QualifiedTableName cassandraTable, List<org.apache.nifi.serialization.record.Record> records, Map<PrimaryKeyIdentifier, RecordPath> primaryKeyOverrides,
+                        List<String> updateKeys, UpdateMethod updateMethod, CqlBatchType batchType,
+                        WriteOverrides overrides) throws QueryFailureException {
         if (records == null || records.isEmpty()) {
             return;
         }
 
-        BatchStatementBuilder builder = BatchStatement.builder(BatchType.LOGGED);
+        final boolean useTimestampOverride = hasTimestampOverride(overrides) && updateMethod == UpdateMethod.SET;
+        BatchStatementBuilder builder = BatchStatement.builder(toDriverBatchType(batchType));
 
-        GeneratedResult result = generateUpdate(cassandraTable, records.get(0), updateKeys, updateMethod);
+        GeneratedResult result = generateUpdate(cassandraTable, records.get(0), primaryKeyOverrides, updateKeys, updateMethod, resolveTtlSeconds(overrides, defaultTtl), useTimestampOverride);
         PreparedStatement preparedStatement = cassandraSession.prepare(result.statement());
 
         for (org.apache.nifi.serialization.record.Record record : records) {
-            builder.addStatement(preparedStatement.bind(getBindValues(record, result.keysUsed())));
+            Object[] values = getBindValues(cassandraTable, primaryKeyOverrides, record, preparedStatement, result.keysUsed());
+            if (useTimestampOverride) {
+                setTimestampBindValue(values, preparedStatement, record, overrides);
+            }
+            builder.addStatement(preparedStatement.bind(values));
         }
-        cassandraSession.execute(builder.build());
+
+        try {
+            cassandraSession.execute(builder.build());
+        } catch (QueryExecutionException | AllNodesFailedException qee) {
+            getLogger().error("Error executing batch update", qee);
+            throw new QueryFailureException();
+        }
+    }
+
+    @Override
+    public PrimaryKey getMetadata(QualifiedTableName table) {
+        cacheMetadata(table);
+        return tableMetadataCache.get(resolveKeyspace(table));
     }
 
     record GeneratedResult(SimpleStatement statement, List<String> keysUsed) {

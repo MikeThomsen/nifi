@@ -17,16 +17,23 @@
 package org.apache.nifi.processors.cql;
 
 import org.apache.commons.lang3.StringUtils;
+import org.apache.nifi.annotation.behavior.DynamicProperty;
 import org.apache.nifi.annotation.behavior.InputRequirement;
 import org.apache.nifi.annotation.behavior.ReadsAttribute;
 import org.apache.nifi.annotation.behavior.ReadsAttributes;
+import org.apache.nifi.annotation.behavior.WritesAttribute;
+import org.apache.nifi.annotation.behavior.WritesAttributes;
 import org.apache.nifi.annotation.documentation.CapabilityDescription;
 import org.apache.nifi.annotation.documentation.Tags;
+import org.apache.nifi.annotation.lifecycle.OnEnabled;
+import org.apache.nifi.annotation.lifecycle.OnScheduled;
 import org.apache.nifi.annotation.lifecycle.OnShutdown;
 import org.apache.nifi.annotation.lifecycle.OnUnscheduled;
 import org.apache.nifi.components.PropertyDescriptor;
+import org.apache.nifi.components.PropertyValue;
 import org.apache.nifi.components.ValidationContext;
 import org.apache.nifi.components.ValidationResult;
+import org.apache.nifi.controller.ConfigurationContext;
 import org.apache.nifi.expression.ExpressionLanguageScope;
 import org.apache.nifi.flowfile.FlowFile;
 import org.apache.nifi.processor.ProcessContext;
@@ -37,27 +44,34 @@ import org.apache.nifi.processor.util.StandardValidators;
 import org.apache.nifi.processors.cql.constants.BatchStatementType;
 import org.apache.nifi.processors.cql.constants.StatementType;
 import org.apache.nifi.processors.cql.constants.UpdateType;
+import org.apache.nifi.record.path.RecordPath;
+import org.apache.nifi.record.path.util.RecordPathCache;
+import org.apache.nifi.record.path.validation.RecordPathValidator;
 import org.apache.nifi.serialization.RecordReader;
 import org.apache.nifi.serialization.RecordReaderFactory;
 import org.apache.nifi.serialization.record.Record;
+import org.apache.nifi.serialization.record.RecordSchema;
 import org.apache.nifi.service.cql.api.CQLExecutionService;
+import org.apache.nifi.service.cql.api.CqlBatchType;
 import org.apache.nifi.service.cql.api.UpdateMethod;
+import org.apache.nifi.service.cql.api.WriteOverrides;
+import org.apache.nifi.service.cql.api.exception.QueryFailureException;
+import org.apache.nifi.service.cql.api.metadata.PrimaryKeyIdentifier;
+import org.apache.nifi.service.cql.api.metadata.QualifiedTableName;
 import org.apache.nifi.util.StopWatch;
 
 import java.io.InputStream;
-import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.Collection;
-import java.util.Collections;
-import java.util.HashSet;
-import java.util.List;
-import java.util.Set;
+import java.time.Duration;
+import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
 import static java.lang.String.format;
-import static java.util.Collections.EMPTY_LIST;
 import static org.apache.nifi.processors.cql.constants.BatchStatementType.BATCH_STATEMENT_TYPE_USE_ATTR_TYPE;
 import static org.apache.nifi.processors.cql.constants.BatchStatementType.COUNTER_TYPE;
 import static org.apache.nifi.processors.cql.constants.BatchStatementType.LOGGED_TYPE;
@@ -83,12 +97,27 @@ import static org.apache.nifi.processors.cql.constants.UpdateType.INCR_TYPE;
                 "Statement Type property, the value of the cql.batch.statement.type Attribute will be used to determine which type of batch statement " +
                 "(LOGGED, UNLOGGED, COUNTER) will be generated and executed")
 })
+@WritesAttributes({
+        @WritesAttribute(attribute = "cql.records.written", description = "On failure or retry, the number of records that were already successfully "
+                + "written to Cassandra/ScyllaDB before the error occurred. Since records are written in batches as they're read, earlier batches "
+                + "may have already been committed even though the FlowFile as a whole did not succeed.")
+})
+@DynamicProperty(name = "<keyspace>.<table>.<field>", value = "A RecordPath expression",
+        expressionLanguageScope = ExpressionLanguageScope.NONE,
+        description = "Overrides how the named primary key column's value is resolved for records written to the given "
+                + "keyspace-qualified table, in place of the default behavior of matching a record field with the same "
+                + "name as the column. The RecordPath is evaluated once per record and must resolve to exactly one "
+                + "value; zero or more than one is a configuration error for that record. See 'Additional Details' for "
+                + "the full name format and examples, including how to supply a valid version-1 (time-based) UUID for "
+                + "a timeuuid primary key column.")
 public class PutCQLRecord extends AbstractCQLProcessor {
     static final String STATEMENT_TYPE_ATTRIBUTE = "cql.statement.type";
 
     static final String UPDATE_METHOD_ATTRIBUTE = "cql.update.method";
 
     static final String BATCH_STATEMENT_TYPE_ATTRIBUTE = "cql.batch.statement.type";
+
+    static final String RECORDS_WRITTEN_ATTRIBUTE = "cql.records.written";
 
     static final PropertyDescriptor RECORD_READER_FACTORY = new PropertyDescriptor.Builder()
             .name("Record Reader")
@@ -127,7 +156,10 @@ public class PutCQLRecord extends AbstractCQLProcessor {
 
     static final PropertyDescriptor TABLE = new PropertyDescriptor.Builder()
             .name("Table name")
-            .description("The name of the Cassandra table to which the records have to be written.")
+            .description("The name of the Cassandra table to which the records have to be written. This can be expressed " +
+                    "as either a raw table name or a qualified table name (ex. <keyspace>.<tablename>). Due to the dynamic " +
+                    "nature of this property, it will be validated at runtime by this processor and raise an error if " +
+                    "it is neither <tablename> nor <keyspace>.<tablename> when the value is retrieved.")
             .required(true)
             .addValidator(StandardValidators.NON_EMPTY_EL_VALIDATOR)
             .expressionLanguageSupported(ExpressionLanguageScope.FLOWFILE_ATTRIBUTES)
@@ -150,21 +182,115 @@ public class PutCQLRecord extends AbstractCQLProcessor {
             .required(false)
             .build();
 
-    private final static List<PropertyDescriptor> propertyDescriptors = Collections.unmodifiableList(Arrays.asList(
-            CONNECTION_PROVIDER_SERVICE, TABLE, STATEMENT_TYPE, UPDATE_KEYS, UPDATE_METHOD,
-            RECORD_READER_FACTORY, BATCH_SIZE, BATCH_STATEMENT_TYPE));
+    static final PropertyDescriptor TTL = new PropertyDescriptor.Builder()
+            .name("Time To Live")
+            .description("Overrides the connection service's configured Default Time To Live (TTL) for records written by this processor. "
+                    + "Applies to INSERT statements and to UPDATE statements using the SET method; ignored for Increment/Decrement updates, "
+                    + "since Cassandra/ScyllaDB do not support a TTL on counter columns. If not set, the connection service's configured "
+                    + "default (if any) is used.")
+            .required(false)
+            .expressionLanguageSupported(ExpressionLanguageScope.FLOWFILE_ATTRIBUTES)
+            .addValidator(StandardValidators.TIME_PERIOD_VALIDATOR)
+            .build();
 
-    private final static Set<Relationship> relationships = Collections.unmodifiableSet(
-            new HashSet<>(Arrays.asList(REL_SUCCESS, REL_FAILURE)));
+    static final PropertyDescriptor TIMESTAMP_FIELD = new PropertyDescriptor.Builder()
+            .name("Timestamp Field")
+            .description("The name of a field in each record whose value supplies the CQL write timestamp for that record's INSERT or "
+                    + "SET-method UPDATE statement, instead of the time the statement executes. Useful for safe retries/reprocessing: "
+                    + "resubmitting the same record with the same timestamp is a true no-op rather than a write that could win a "
+                    + "last-write-wins race against different data written to the same row in the meantime. Ignored for Increment/Decrement "
+                    + "updates, since Cassandra/ScyllaDB do not support a custom write timestamp on counter columns. If not set, the current "
+                    + "time is used, as usual.")
+            .required(false)
+            .expressionLanguageSupported(ExpressionLanguageScope.FLOWFILE_ATTRIBUTES)
+            .addValidator(StandardValidators.NON_EMPTY_VALIDATOR)
+            .build();
+
+    private static final List<PropertyDescriptor> PROPERTY_DESCRIPTORS = Collections.unmodifiableList(Arrays.asList(
+            CONNECTION_PROVIDER_SERVICE, TABLE, STATEMENT_TYPE, UPDATE_KEYS, UPDATE_METHOD,
+            RECORD_READER_FACTORY, BATCH_SIZE, BATCH_STATEMENT_TYPE, TTL, TIMESTAMP_FIELD));
+
+    private static final Set<Relationship> RELATIONSHIPS = Collections.unmodifiableSet(
+            new HashSet<>(Arrays.asList(REL_SUCCESS, REL_FAILURE, REL_RETRY)));
+
+    private static final Pattern QUALIFIED_TABLE_PATTERN = Pattern.compile(
+            "^(?<keyspace>[a-zA-Z][a-zA-Z0-9_]*)\\.(?<table>[a-zA-Z][a-zA-Z0-9_]*)\\.(?<field>[a-zA-Z][a-zA-Z0-9_]*)$");
+    private static final Pattern TABLE_REGEX = Pattern.compile(
+            "^(?:(?<keyspace>[a-zA-Z][a-zA-Z0-9_]{1,48})\\.)?(?<table>[a-zA-Z][a-zA-Z0-9_]{1,48})$");
+
+    private RecordPathCache recordPathCache;
 
     @Override
     protected List<PropertyDescriptor> getSupportedPropertyDescriptors() {
-        return propertyDescriptors;
+        return PROPERTY_DESCRIPTORS;
+    }
+
+    @Override
+    protected PropertyDescriptor getSupportedDynamicPropertyDescriptor(String propertyDescriptorName) {
+        Matcher matcher = QUALIFIED_TABLE_PATTERN.matcher(propertyDescriptorName);
+
+        if (!matcher.matches()) {
+            throw new IllegalArgumentException(String.format("%s is not a valid qualified table name and field name", propertyDescriptorName));
+        }
+
+        String keyspace = matcher.group("keyspace");
+        String table = matcher.group("table");
+        String field = matcher.group("field");
+
+        return new PropertyDescriptor.Builder()
+                .dynamic(true)
+                .name(propertyDescriptorName)
+                .description("""
+                    This property sets a record path to be evaluated for field %s on table %s.%s
+                """.formatted(field, keyspace, table).trim())
+                .defaultValue("")
+                .addValidator(new RecordPathValidator())
+                .build();
+    }
+
+    @OnScheduled
+    public void onScheduled(ProcessContext context) {
+        super.onScheduled(context);
+
+        this.recordPathCache = new RecordPathCache(50);
+        this.createRecordPathOverrides(context);
+    }
+
+    private Map<PrimaryKeyIdentifier, RecordPath> recordPathOverrides;
+
+    private void createRecordPathOverrides(ProcessContext context) {
+        final Map<PrimaryKeyIdentifier, RecordPath> overrides = new HashMap<>();
+
+        context
+                .getProperties()
+                .keySet()
+                .stream()
+                .filter(PropertyDescriptor::isDynamic)
+                .forEach(p -> {
+                    String rawPath = context.getProperty(p).getValue();
+                    RecordPath compiledPath = recordPathCache.getCompiled(rawPath);
+                    Matcher matcher = QUALIFIED_TABLE_PATTERN.matcher(p.getName());
+                    if (matcher.matches()) {
+                        PrimaryKeyIdentifier identifier = new PrimaryKeyIdentifier(matcher.group("keyspace"),
+                                matcher.group("table"), matcher.group("field"));
+                        overrides.put(identifier, compiledPath);
+                    }
+                });
+        recordPathOverrides = new ConcurrentHashMap<>(overrides);
+    }
+
+    private Map<PrimaryKeyIdentifier, RecordPath> resolveSpecificOverrides(QualifiedTableName tableName) {
+        return new HashMap<>(recordPathOverrides
+                .entrySet()
+                .stream()
+                .filter(e -> e.getKey().keyspace().equals(tableName.keyspace()) &&
+                        e.getKey().tableName().equals(tableName.table()))
+                .collect(Collectors.toMap(Map.Entry::getKey, Map.Entry::getValue)));
     }
 
     @Override
     public Set<Relationship> getRelationships() {
-        return relationships;
+        return RELATIONSHIPS;
     }
 
     @Override
@@ -176,6 +302,18 @@ public class PutCQLRecord extends AbstractCQLProcessor {
         }
 
         final String cassandraTable = context.getProperty(TABLE).evaluateAttributeExpressions(inputFlowFile).getValue();
+        final QualifiedTableName qualifiedTableName;
+
+        try {
+            qualifiedTableName = qualifyTable(cassandraTable);
+        } catch (IllegalArgumentException e) {
+            getLogger().error("Error processing", e);
+            session.transfer(inputFlowFile, REL_FAILURE);
+            return;
+        }
+
+        Map<PrimaryKeyIdentifier, RecordPath> specificOverrides = resolveSpecificOverrides(qualifiedTableName);
+
         final RecordReaderFactory recordParserFactory = context.getProperty(RECORD_READER_FACTORY).asControllerService(RecordReaderFactory.class);
         final int batchSize = context.getProperty(BATCH_SIZE).evaluateAttributeExpressions().asInteger();
         final String updateKeys = context.getProperty(UPDATE_KEYS).evaluateAttributeExpressions(inputFlowFile).getValue();
@@ -191,7 +329,8 @@ public class PutCQLRecord extends AbstractCQLProcessor {
         final String updateMethodProperty = context.getProperty(UPDATE_METHOD).getValue();
         String updateMethod = updateMethodProperty;
         if (UpdateType.UPDATE_METHOD_USE_ATTR_TYPE.getValue().equals(updateMethodProperty)) {
-            updateMethod = inputFlowFile.getAttribute(UPDATE_METHOD_ATTRIBUTE);
+            final String updateMethodAttr = inputFlowFile.getAttribute(UPDATE_METHOD_ATTRIBUTE);
+            updateMethod = StringUtils.isBlank(updateMethodAttr) ? null : updateMethodAttr.toUpperCase();
         }
 
 
@@ -205,6 +344,14 @@ public class PutCQLRecord extends AbstractCQLProcessor {
         if (StringUtils.isEmpty(batchStatementType)) {
             throw new IllegalArgumentException(format("Batch Statement Type is not specified, FlowFile %s", inputFlowFile));
         }
+
+        final PropertyValue ttlProperty = context.getProperty(TTL).evaluateAttributeExpressions(inputFlowFile);
+        final Duration ttlOverride = ttlProperty.isSet() ? ttlProperty.asDuration() : null;
+
+        final PropertyValue timestampFieldProperty = context.getProperty(TIMESTAMP_FIELD).evaluateAttributeExpressions(inputFlowFile);
+        final String timestampField = timestampFieldProperty.isSet() ? timestampFieldProperty.getValue() : null;
+
+        final WriteOverrides writeOverrides = new WriteOverrides(ttlOverride, timestampField);
 
         final AtomicInteger recordsAdded = new AtomicInteger(0);
         final StopWatch stopWatch = new StopWatch(true);
@@ -221,7 +368,7 @@ public class PutCQLRecord extends AbstractCQLProcessor {
 
             // throw an exception if the statement type is set to update and updateKeys is empty
             if (UPDATE_TYPE.getValue().equalsIgnoreCase(statementType) && StringUtils.isEmpty(updateKeys)) {
-                    throw new IllegalArgumentException(format("Update Keys are not specified, FlowFile %s", inputFlowFile));
+                throw new IllegalArgumentException(format("Update Keys are not specified, FlowFile %s", inputFlowFile));
             }
 
             // throw an exception if the statement type is update and update method is not set
@@ -233,7 +380,7 @@ public class PutCQLRecord extends AbstractCQLProcessor {
                             .split(","))
                     .map(key -> key.trim())
                     .filter(key -> StringUtils.isNotEmpty(key))
-                    .toList() : EMPTY_LIST;
+                    .toList() : List.of();
 
             // throw an exception if the Update Method is Increment or Decrement and the batch statement type is not UNLOGGED or COUNTER
             if (INCR_TYPE.getValue().equalsIgnoreCase(updateMethod) || DECR_TYPE.getValue().equalsIgnoreCase(updateMethod)) {
@@ -243,42 +390,77 @@ public class PutCQLRecord extends AbstractCQLProcessor {
                 }
             }
 
+            // throw an exception if the statement type is INSERT and the batch statement type is COUNTER: Cassandra/ScyllaDB
+            // do not allow INSERT statements against counter tables, only UPDATE
+            if (INSERT_TYPE.getValue().equalsIgnoreCase(statementType) && COUNTER_TYPE.getValue().equalsIgnoreCase(batchStatementType)) {
+                throw new IllegalArgumentException(format("Statement Type INSERT cannot be used with COUNTER Batch Statement Type, FlowFile %s", inputFlowFile));
+            }
+
+            // throw an exception if a Timestamp Field is configured but isn't actually a field in the incoming
+            // records - checked unconditionally (regardless of whether the resolved statement/update method
+            // would even use it) so a mistyped field name always fails the same way, rather than only
+            // sometimes, depending on which attribute-driven statement type a given FlowFile happens to take.
+            if (StringUtils.isNotEmpty(timestampField)) {
+                final RecordSchema recordSchema = reader.getSchema();
+                if (!recordSchema.getFieldNames().contains(timestampField)) {
+                    throw new IllegalArgumentException(format("Timestamp Field '%s' is not present in the record schema, FlowFile %s", timestampField, inputFlowFile));
+                }
+            }
+
             Record record;
             List<Record> recordsBatch = new ArrayList<>();
             CQLExecutionService sessionProviderService = super.cqlSessionService.get();
+            final boolean isUpdate = UPDATE_TYPE.getValue().equalsIgnoreCase(statementType);
+            final UpdateMethod resolvedUpdateMethod = isUpdate ? UpdateMethod.valueOf(updateMethod) : null;
+            final CqlBatchType resolvedBatchType = CqlBatchType.valueOf(batchStatementType);
+
+            // Writes and clears the current batch, tracking how many records have been written so far so that
+            // a mid-stream failure can report an accurate count instead of leaving it at 0, and emits a
+            // provenance event per batch so a partial failure still leaves a trail of what was actually written.
+            final Runnable flushBatch = () -> {
+                final int batchRecordCount = recordsBatch.size();
+
+                if (isUpdate) {
+                    sessionProviderService.update(qualifiedTableName, recordsBatch, specificOverrides, updateKeyNames, resolvedUpdateMethod, resolvedBatchType, writeOverrides);
+                } else {
+                    sessionProviderService.insert(qualifiedTableName, recordsBatch, specificOverrides, resolvedBatchType, writeOverrides);
+                }
+
+                recordsAdded.addAndGet(batchRecordCount);
+                session.getProvenanceReporter().send(inputFlowFile, sessionProviderService.getTransitUrl(qualifiedTableName),
+                        format("Wrote %d records (%d total)", batchRecordCount, recordsAdded.get()), stopWatch.getElapsed(TimeUnit.MILLISECONDS));
+                recordsBatch.clear();
+            };
 
             while ((record = reader.nextRecord()) != null) {
                 recordsBatch.add(record);
 
                 if (recordsBatch.size() == batchSize) {
-                    if (UPDATE_TYPE.getValue().equalsIgnoreCase(statementType)) {
-                        sessionProviderService.update(cassandraTable, recordsBatch, updateKeyNames, UpdateMethod.valueOf(updateMethod));
-                    } else {
-                        sessionProviderService.insert(cassandraTable, recordsBatch);
-                    }
-                    recordsBatch.clear();
+                    flushBatch.run();
                 }
             }
 
             if (!recordsBatch.isEmpty()) {
-                if (UPDATE_TYPE.getValue().equalsIgnoreCase(statementType)) {
-                    sessionProviderService.update(cassandraTable, recordsBatch, updateKeyNames, UpdateMethod.valueOf(updateMethod));
-                } else {
-                    sessionProviderService.insert(cassandraTable, recordsBatch);
-                }
-                recordsBatch.clear();
+                flushBatch.run();
             }
 
+        } catch (QueryFailureException qfe) {
+            error = true;
+            final FlowFile flowFileToRetry = session.putAttribute(inputFlowFile, RECORDS_WRITTEN_ATTRIBUTE, String.valueOf(recordsAdded.get()));
+            getLogger().error("Cassandra query failure writing records for {}, {} records already written this attempt, routing to retry",
+                    inputFlowFile, recordsAdded.get(), qfe);
+            session.transfer(session.penalize(flowFileToRetry), REL_RETRY);
+        } catch (IllegalArgumentException e) {
+            error = true;
+            getLogger().error("Invalid PutCQLRecord configuration for {}", inputFlowFile, e);
+            session.transfer(inputFlowFile, REL_FAILURE);
         } catch (Exception e) {
             error = true;
-            getLogger().error("Unable to write the records into Cassandra table", e);
-            session.transfer(inputFlowFile, REL_FAILURE);
+            final FlowFile failedFlowFile = session.putAttribute(inputFlowFile, RECORDS_WRITTEN_ATTRIBUTE, String.valueOf(recordsAdded.get()));
+            getLogger().error("Unable to write the records into Cassandra table, {} records already written this attempt", recordsAdded.get(), e);
+            session.transfer(failedFlowFile, REL_FAILURE);
         } finally {
             if (!error) {
-                stopWatch.stop();
-                long duration = stopWatch.getDuration(TimeUnit.MILLISECONDS);
-
-                session.getProvenanceReporter().send(inputFlowFile, super.cqlSessionService.get().getTransitUrl(cassandraTable), "Inserted " + recordsAdded.get() + " records", duration);
                 session.transfer(inputFlowFile, REL_SUCCESS);
             }
         }
@@ -287,9 +469,10 @@ public class PutCQLRecord extends AbstractCQLProcessor {
 
     @Override
     protected Collection<ValidationResult> customValidate(ValidationContext validationContext) {
-        Set<ValidationResult> results = (Set<ValidationResult>) super.customValidate(validationContext);
+        Set<ValidationResult> results = new HashSet<>(super.customValidate(validationContext));
 
         String statementType = validationContext.getProperty(STATEMENT_TYPE).getValue();
+        String batchStatementType = validationContext.getProperty(BATCH_STATEMENT_TYPE).getValue();
 
         if (UPDATE_TYPE.getValue().equalsIgnoreCase(statementType)) {
             // Check that update keys are set
@@ -302,7 +485,6 @@ public class PutCQLRecord extends AbstractCQLProcessor {
             // Check that if the update method is set to increment or decrement that the batch statement type is set to
             // unlogged or counter (or USE_ATTR_TYPE, which we cannot check at this point).
             String updateMethod = validationContext.getProperty(UPDATE_METHOD).getValue();
-            String batchStatementType = validationContext.getProperty(BATCH_STATEMENT_TYPE).getValue();
             if (INCR_TYPE.getValue().equalsIgnoreCase(updateMethod)
                     || DECR_TYPE.getValue().equalsIgnoreCase(updateMethod)) {
                 if (!(COUNTER_TYPE.getValue().equalsIgnoreCase(batchStatementType)
@@ -313,6 +495,13 @@ public class PutCQLRecord extends AbstractCQLProcessor {
                                     "to either COUNTER or UNLOGGED").build());
                 }
             }
+        } else if (INSERT_TYPE.getValue().equalsIgnoreCase(statementType)
+                && COUNTER_TYPE.getValue().equalsIgnoreCase(batchStatementType)) {
+            // Cassandra/ScyllaDB do not allow INSERT statements against counter tables, only UPDATE, so this
+            // combination can never succeed (USE_ATTR_TYPE for either property cannot be checked at this point).
+            results.add(new ValidationResult.Builder().subject("Batch Statement Type configuration").valid(false).explanation(
+                    "if the Statement Type is set to INSERT, then the Batch Statement Type cannot be set to COUNTER, since "
+                            + "Cassandra/ScyllaDB only allow COUNTER batches against UPDATE statements").build());
         }
 
         return results;
@@ -327,6 +516,18 @@ public class PutCQLRecord extends AbstractCQLProcessor {
     @OnShutdown
     public void shutdown(ProcessContext context) {
         super.stop(context);
+    }
+
+    private QualifiedTableName qualifyTable(String tableName) {
+        Matcher matcher = TABLE_REGEX.matcher(tableName);
+        if (!matcher.matches()) {
+            throw new IllegalArgumentException(String.format("%s is not a valid table name", tableName));
+        }
+
+        String keyspace = matcher.group("keyspace");
+        String table = matcher.group("table");
+
+        return new QualifiedTableName(keyspace, table);
     }
 
 }

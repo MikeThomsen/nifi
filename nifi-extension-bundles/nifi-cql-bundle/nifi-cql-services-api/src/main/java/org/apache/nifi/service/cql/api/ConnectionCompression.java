@@ -19,6 +19,10 @@ package org.apache.nifi.service.cql.api;
 
 import org.apache.nifi.components.DescribedValue;
 
+/**
+ * Allowable values for {@link CQLExecutionService#COMPRESSION_TYPE}: the transport-level compression applied
+ * to requests/responses between the driver and the cluster.
+ */
 public enum ConnectionCompression implements DescribedValue {
     NONE("none", "None", "None"),
     LZ4("lz4", "LZ4", "LZ4"),

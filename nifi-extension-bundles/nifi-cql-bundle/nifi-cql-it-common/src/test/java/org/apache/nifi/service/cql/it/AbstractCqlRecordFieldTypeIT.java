@@ -1,0 +1,755 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements.  See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License.  You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package org.apache.nifi.service.cql.it;
+
+import com.datastax.oss.driver.api.core.CqlSession;
+import com.datastax.oss.driver.api.core.DriverTimeoutException;
+import com.datastax.oss.driver.api.core.data.UdtValue;
+import com.datastax.oss.driver.api.core.uuid.Uuids;
+import org.apache.nifi.serialization.SimpleRecordSchema;
+import org.apache.nifi.serialization.record.MapRecord;
+import org.apache.nifi.serialization.record.RecordField;
+import org.apache.nifi.serialization.record.RecordFieldType;
+import org.apache.nifi.serialization.record.RecordSchema;
+import org.apache.nifi.service.cql.api.CQLExecutionService;
+import org.apache.nifi.service.cql.api.CQLQueryCallback;
+import org.apache.nifi.service.cql.api.QueryOverrides;
+import org.apache.nifi.service.cql.api.WriteOverrides;
+import org.apache.nifi.service.cql.api.metadata.QualifiedTableName;
+import org.apache.nifi.util.TestRunner;
+import org.apache.nifi.util.TestRunners;
+import org.junit.jupiter.api.DisplayName;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.TestInstance;
+
+import java.math.BigDecimal;
+import java.math.BigInteger;
+import java.sql.Date;
+import java.sql.Time;
+import java.time.Instant;
+import java.time.LocalDate;
+import java.time.LocalTime;
+import java.time.temporal.ChronoUnit;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.UUID;
+
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
+/**
+ * Exercises {@link CQLExecutionService#insert(String, org.apache.nifi.serialization.record.Record, WriteOverrides)}
+ * and {@link CQLExecutionService#query(String, boolean, List, CQLQueryCallback, QueryOverrides)} once per
+ * {@link RecordFieldType},
+ * excluding CHOICE, which has no natural CQL column type since it represents a union of possible types rather
+ * than a single one, against whichever backend the concrete subclass wires up. Every test follows the same
+ * shape: write a record, assert the write succeeds, read the row back, and assert the value comes back
+ * correctly. Each test creates a dedicated table whose one non-key column is a CQL type that naturally fits
+ * the RecordFieldType under test, or - for RECORD and MAP, whose natural fit needs more than a single column
+ * type - a User Defined Type.
+ *
+ * <p>{@code CassandraCQLExecutionService} (the base implementation both Cassandra's and ScyllaDB's session
+ * providers share) binds {@code Record.getValue(fieldName)} directly to the prepared statement without any
+ * type coercion beyond what {@code convertForCqlType} normalizes, so several tests here deliberately use a
+ * non-canonical input value (a {@code String}, a mismatched {@code Number}, etc.) to prove that normalization
+ * actually happens, then confirm the stored value is correct by reading it back.
+ * <p>
+ * Setup is a plain protected method rather than a JUnit lifecycle callback for the same reason documented on
+ * {@link AbstractCqlCrudIT}.
+ */
+@TestInstance(TestInstance.Lifecycle.PER_CLASS)
+public abstract class AbstractCqlRecordFieldTypeIT {
+
+    private static final int DDL_MAX_ATTEMPTS = 3;
+
+    protected CQLExecutionService sessionProvider;
+
+    private CqlSession session;
+
+    private String keyspace;
+
+    /**
+     * @return a fresh, unconfigured instance of the backend implementation under test
+     */
+    protected abstract CQLExecutionService newSessionProvider();
+
+    protected void initializeSessionProvider(final CqlConnectionInfo connectionInfo) throws Exception {
+        this.session = connectionInfo.session();
+        this.keyspace = connectionInfo.keyspace();
+        this.sessionProvider = newSessionProvider();
+
+        final TestRunner runner = TestRunners.newTestRunner(new MockCqlProcessor());
+        runner.addControllerService("cql-session-provider", sessionProvider);
+        runner.setProperty(sessionProvider, CQLExecutionService.CONTACT_POINTS, connectionInfo.contactPoint());
+        runner.setProperty(sessionProvider, CQLExecutionService.DATACENTER, connectionInfo.datacenter());
+        runner.setProperty(sessionProvider, CQLExecutionService.KEYSPACE, connectionInfo.keyspace());
+        runner.enableControllerService(sessionProvider);
+    }
+
+    /**
+     * Executes a schema-modifying statement, retrying on {@link DriverTimeoutException}. ScyllaDB's Raft-based
+     * schema management (and, less often, Cassandra's own schema agreement) occasionally takes longer than the
+     * configured request timeout to settle a single DDL statement even though the cluster is otherwise healthy,
+     * so a bare timeout here doesn't mean the statement failed - it may still succeed moments later server-side.
+     * Every statement passed here must therefore be an idempotent "if not exists" form, since a retry after a
+     * false-negative timeout must not fail with "already exists".
+     */
+    private void executeDdlWithRetry(final String cql) {
+        DriverTimeoutException lastFailure = null;
+        for (int attempt = 1; attempt <= DDL_MAX_ATTEMPTS; attempt++) {
+            try {
+                session.execute(cql);
+                return;
+            } catch (final DriverTimeoutException e) {
+                lastFailure = e;
+            }
+        }
+        throw lastFailure;
+    }
+
+    private void createTable(final String tableName, final String cqlColumnType) {
+        executeDdlWithRetry(String.format("create table if not exists %s.%s (id int primary key, value_field %s)", keyspace, tableName, cqlColumnType));
+    }
+
+    private RecordSchema schemaFor(final RecordField valueField) {
+        return new SimpleRecordSchema(List.of(new RecordField("id", RecordFieldType.INT.getDataType()), valueField));
+    }
+
+    /**
+     * Reads back exactly one row via {@link CQLExecutionService#query}, asserting the query itself doesn't
+     * throw and that exactly one row came back, then returns it for the caller to assert on.
+     */
+    private org.apache.nifi.serialization.record.Record readBack(final String tableName, final String columns, final int id) {
+        final List<org.apache.nifi.serialization.record.Record> results = new ArrayList<>();
+        final CQLQueryCallback callback = (rowNumber, result, isExhausted) -> results.add(result);
+
+        assertDoesNotThrow(() -> sessionProvider.query(
+                String.format("select %s from %s.%s where id = %d", columns, keyspace, tableName, id), false, null, callback, QueryOverrides.NONE));
+
+        assertEquals(1, results.size(), () -> "Expected exactly one row back from " + tableName);
+        return results.getFirst();
+    }
+
+    @Test
+    @DisplayName("A record with a BOOLEAN field writes to and reads back from a boolean column")
+    void testBoolean() {
+        createTable("boolean_test", "boolean");
+        final RecordSchema schema = schemaFor(new RecordField("value_field", RecordFieldType.BOOLEAN.getDataType()));
+        final MapRecord record = new MapRecord(schema, Map.of("id", 1, "value_field", Boolean.TRUE));
+
+        assertDoesNotThrow(() -> sessionProvider.insert(new QualifiedTableName(null, "boolean_test"), record, Map.of(), WriteOverrides.NONE));
+
+        assertEquals(Boolean.TRUE, readBack("boolean_test", "value_field", 1).getValue("value_field"));
+    }
+
+    @Test
+    @DisplayName("A record with a BYTE field writes to and reads back from a tinyint column")
+    void testByte() {
+        createTable("byte_test", "tinyint");
+        final RecordSchema schema = schemaFor(new RecordField("value_field", RecordFieldType.BYTE.getDataType()));
+        final MapRecord record = new MapRecord(schema, Map.of("id", 1, "value_field", (byte) 42));
+
+        assertDoesNotThrow(() -> sessionProvider.insert(new QualifiedTableName(null, "byte_test"), record, Map.of(), WriteOverrides.NONE));
+
+        assertEquals((byte) 42, readBack("byte_test", "value_field", 1).getValue("value_field"));
+    }
+
+    @Test
+    @DisplayName("A record with a SHORT field writes to and reads back from a smallint column")
+    void testShort() {
+        createTable("short_test", "smallint");
+        final RecordSchema schema = schemaFor(new RecordField("value_field", RecordFieldType.SHORT.getDataType()));
+        final MapRecord record = new MapRecord(schema, Map.of("id", 1, "value_field", (short) 1234));
+
+        assertDoesNotThrow(() -> sessionProvider.insert(new QualifiedTableName(null, "short_test"), record, Map.of(), WriteOverrides.NONE));
+
+        assertEquals((short) 1234, readBack("short_test", "value_field", 1).getValue("value_field"));
+    }
+
+    @Test
+    @DisplayName("A record with an INT field writes to and reads back from an int column")
+    void testInt() {
+        createTable("int_test", "int");
+        final RecordSchema schema = schemaFor(new RecordField("value_field", RecordFieldType.INT.getDataType()));
+        final MapRecord record = new MapRecord(schema, Map.of("id", 1, "value_field", 123456));
+
+        assertDoesNotThrow(() -> sessionProvider.insert(new QualifiedTableName(null, "int_test"), record, Map.of(), WriteOverrides.NONE));
+
+        assertEquals(123456, readBack("int_test", "value_field", 1).getValue("value_field"));
+    }
+
+    @Test
+    @DisplayName("A record with a LONG field writes to and reads back from a bigint column")
+    void testLong() {
+        createTable("long_test", "bigint");
+        final RecordSchema schema = schemaFor(new RecordField("value_field", RecordFieldType.LONG.getDataType()));
+        final MapRecord record = new MapRecord(schema, Map.of("id", 1, "value_field", 123456789012345L));
+
+        assertDoesNotThrow(() -> sessionProvider.insert(new QualifiedTableName(null, "long_test"), record, Map.of(), WriteOverrides.NONE));
+
+        assertEquals(123456789012345L, readBack("long_test", "value_field", 1).getValue("value_field"));
+    }
+
+    @Test
+    @DisplayName("A record with a BIGINT field writes to and reads back from a varint column")
+    void testBigint() {
+        createTable("bigint_test", "varint");
+        final RecordSchema schema = schemaFor(new RecordField("value_field", RecordFieldType.BIGINT.getDataType()));
+        final BigInteger expected = new BigInteger("123456789012345678901234567890");
+        final MapRecord record = new MapRecord(schema, Map.of("id", 1, "value_field", expected));
+
+        assertDoesNotThrow(() -> sessionProvider.insert(new QualifiedTableName(null, "bigint_test"), record, Map.of(), WriteOverrides.NONE));
+
+        assertEquals(expected, readBack("bigint_test", "value_field", 1).getValue("value_field"));
+    }
+
+    @Test
+    @DisplayName("A record with a FLOAT field writes to and reads back from a float column")
+    void testFloat() {
+        createTable("float_test", "float");
+        final RecordSchema schema = schemaFor(new RecordField("value_field", RecordFieldType.FLOAT.getDataType()));
+        final MapRecord record = new MapRecord(schema, Map.of("id", 1, "value_field", 3.14f));
+
+        assertDoesNotThrow(() -> sessionProvider.insert(new QualifiedTableName(null, "float_test"), record, Map.of(), WriteOverrides.NONE));
+
+        assertEquals(3.14f, readBack("float_test", "value_field", 1).getValue("value_field"));
+    }
+
+    @Test
+    @DisplayName("A record with a DOUBLE field writes to and reads back from a double column")
+    void testDouble() {
+        createTable("double_test", "double");
+        final RecordSchema schema = schemaFor(new RecordField("value_field", RecordFieldType.DOUBLE.getDataType()));
+        final MapRecord record = new MapRecord(schema, Map.of("id", 1, "value_field", 3.14159d));
+
+        assertDoesNotThrow(() -> sessionProvider.insert(new QualifiedTableName(null, "double_test"), record, Map.of(), WriteOverrides.NONE));
+
+        assertEquals(3.14159d, readBack("double_test", "value_field", 1).getValue("value_field"));
+    }
+
+    @Test
+    @DisplayName("A record with a DECIMAL field writes to and reads back from a decimal column")
+    void testDecimal() {
+        createTable("decimal_test", "decimal");
+        final RecordSchema schema = schemaFor(new RecordField("value_field", RecordFieldType.DECIMAL.getDataType()));
+        final BigDecimal expected = new BigDecimal("123.456");
+        final MapRecord record = new MapRecord(schema, Map.of("id", 1, "value_field", expected));
+
+        assertDoesNotThrow(() -> sessionProvider.insert(new QualifiedTableName(null, "decimal_test"), record, Map.of(), WriteOverrides.NONE));
+
+        assertEquals(expected, readBack("decimal_test", "value_field", 1).getValue("value_field"));
+    }
+
+    @Test
+    @DisplayName("A record with a DECIMAL field carrying explicit precision and scale writes to and reads back from a decimal column")
+    void testDecimalWithPrecisionAndScale() {
+        // RecordFieldType.DECIMAL is the only scalar-adjacent type (besides ENUM, covered by testEnum) with its own
+        // DataType subclass - DecimalDataType - so this exercises that logical type specifically, rather than the
+        // plain DataType used by testDecimal. CQL's "decimal" type itself has no fixed precision/scale (it stores
+        // an arbitrary-precision unscaled value), so the precision/scale here is purely NiFi-side schema
+        // metadata; the value must simply conform to it.
+        createTable("decimal_precision_scale_test", "decimal");
+        final RecordSchema schema = schemaFor(new RecordField("value_field", RecordFieldType.DECIMAL.getDecimalDataType(10, 2)));
+        final BigDecimal expected = new BigDecimal("12345678.90");
+        final MapRecord record = new MapRecord(schema, Map.of("id", 1, "value_field", expected));
+
+        assertDoesNotThrow(() -> sessionProvider.insert(new QualifiedTableName(null, "decimal_precision_scale_test"), record, Map.of(), WriteOverrides.NONE));
+
+        assertEquals(expected, readBack("decimal_precision_scale_test", "value_field", 1).getValue("value_field"));
+    }
+
+    @Test
+    @DisplayName("A record with a TIMESTAMP field writes to and reads back from a timestamp column")
+    void testTimestamp() {
+        createTable("timestamp_test", "timestamp");
+        final RecordSchema schema = schemaFor(new RecordField("value_field", RecordFieldType.TIMESTAMP.getDataType()));
+        // CQL's timestamp type only has millisecond resolution, unlike Instant.now()'s sub-millisecond
+        // precision, so the written value is truncated up front to make the round-trip comparison exact.
+        final Instant expected = Instant.now().truncatedTo(ChronoUnit.MILLIS);
+        final MapRecord record = new MapRecord(schema, Map.of("id", 1, "value_field", expected));
+
+        assertDoesNotThrow(() -> sessionProvider.insert(new QualifiedTableName(null, "timestamp_test"), record, Map.of(), WriteOverrides.NONE));
+
+        assertEquals(expected, readBack("timestamp_test", "value_field", 1).getValue("value_field"));
+    }
+
+    @Test
+    @DisplayName("A record with a DATE field writes to and reads back from a date column")
+    void testDate() {
+        createTable("date_test", "date");
+        final RecordSchema schema = schemaFor(new RecordField("value_field", RecordFieldType.DATE.getDataType()));
+        final LocalDate expected = LocalDate.now();
+        final MapRecord record = new MapRecord(schema, Map.of("id", 1, "value_field", expected));
+
+        assertDoesNotThrow(() -> sessionProvider.insert(new QualifiedTableName(null, "date_test"), record, Map.of(), WriteOverrides.NONE));
+
+        assertEquals(expected, readBack("date_test", "value_field", 1).getValue("value_field"));
+    }
+
+    @Test
+    @DisplayName("A record with a TIME field writes to and reads back from a time column")
+    void testTime() {
+        createTable("time_test", "time");
+        final RecordSchema schema = schemaFor(new RecordField("value_field", RecordFieldType.TIME.getDataType()));
+        final LocalTime expected = LocalTime.now();
+        final MapRecord record = new MapRecord(schema, Map.of("id", 1, "value_field", expected));
+
+        assertDoesNotThrow(() -> sessionProvider.insert(new QualifiedTableName(null, "time_test"), record, Map.of(), WriteOverrides.NONE));
+
+        assertEquals(expected, readBack("time_test", "value_field", 1).getValue("value_field"));
+    }
+
+    @Test
+    @DisplayName("A record with a UUID field writes to and reads back from a uuid column")
+    void testUuid() {
+        createTable("uuid_test", "uuid");
+        final RecordSchema schema = schemaFor(new RecordField("value_field", RecordFieldType.UUID.getDataType()));
+        final UUID expected = UUID.randomUUID();
+        final MapRecord record = new MapRecord(schema, Map.of("id", 1, "value_field", expected));
+
+        assertDoesNotThrow(() -> sessionProvider.insert(new QualifiedTableName(null, "uuid_test"), record, Map.of(), WriteOverrides.NONE));
+
+        assertEquals(expected, readBack("uuid_test", "value_field", 1).getValue("value_field"));
+    }
+
+    @Test
+    @DisplayName("A record with a version-1 (time-based) UUID field writes to and reads back from a timeuuid column")
+    void testTimeUuid() {
+        createTable("timeuuid_test", "timeuuid");
+        final RecordSchema schema = schemaFor(new RecordField("value_field", RecordFieldType.UUID.getDataType()));
+        final UUID expected = Uuids.timeBased();
+        final MapRecord record = new MapRecord(schema, Map.of("id", 1, "value_field", expected));
+
+        assertDoesNotThrow(() -> sessionProvider.insert(new QualifiedTableName(null, "timeuuid_test"), record, Map.of(), WriteOverrides.NONE));
+
+        assertEquals(expected, readBack("timeuuid_test", "value_field", 1).getValue("value_field"));
+    }
+
+    @Test
+    @DisplayName("A record with a non-version-1 UUID field is rejected, not silently written, when targeting a timeuuid column")
+    void testTimeUuidRejectsNonVersion1Uuid() {
+        // A timeuuid column requires a genuine version 1 (time-based) UUID - the driver's own codec would
+        // otherwise reject this with a confusing CodecNotFoundException ("Codec not found for requested
+        // operation: [TIMEUUID <-> java.util.UUID]") that reads like a driver/configuration problem rather
+        // than a data problem, so convertForCqlType checks and fails clearly before ever reaching bind().
+        createTable("timeuuid_reject_test", "timeuuid");
+        final RecordSchema schema = schemaFor(new RecordField("value_field", RecordFieldType.UUID.getDataType()));
+        final UUID randomUuid = UUID.randomUUID();
+        final MapRecord record = new MapRecord(schema, Map.of("id", 1, "value_field", randomUuid));
+
+        final IllegalArgumentException exception = assertThrows(IllegalArgumentException.class,
+                () -> sessionProvider.insert(new QualifiedTableName(null, "timeuuid_reject_test"), record, Map.of(), WriteOverrides.NONE));
+
+        assertTrue(exception.getMessage().contains(randomUuid.toString()),
+                "Expected the exception message to name the offending value, but was: " + exception.getMessage());
+    }
+
+    @Test
+    @DisplayName("A record with a CHAR field writes to and reads back from a text column")
+    void testChar() {
+        // CQL has no dedicated single-character type, so "text" is the natural fit for CHAR.
+        createTable("char_test", "text");
+        final RecordSchema schema = schemaFor(new RecordField("value_field", RecordFieldType.CHAR.getDataType()));
+        final MapRecord record = new MapRecord(schema, Map.of("id", 1, "value_field", "A"));
+
+        assertDoesNotThrow(() -> sessionProvider.insert(new QualifiedTableName(null, "char_test"), record, Map.of(), WriteOverrides.NONE));
+
+        assertEquals("A", readBack("char_test", "value_field", 1).getValue("value_field"));
+    }
+
+    @Test
+    @DisplayName("A record with an ENUM field writes to and reads back from a text column")
+    void testEnum() {
+        // CQL has no native enum type, so "text" is the natural fit, matching how NiFi itself
+        // represents an ENUM value as its String name.
+        createTable("enum_test", "text");
+        final RecordSchema schema = schemaFor(new RecordField("value_field", RecordFieldType.ENUM.getEnumDataType(List.of("ACTIVE", "INACTIVE"))));
+        final MapRecord record = new MapRecord(schema, Map.of("id", 1, "value_field", "ACTIVE"));
+
+        assertDoesNotThrow(() -> sessionProvider.insert(new QualifiedTableName(null, "enum_test"), record, Map.of(), WriteOverrides.NONE));
+
+        assertEquals("ACTIVE", readBack("enum_test", "value_field", 1).getValue("value_field"));
+    }
+
+    @Test
+    @DisplayName("A record with a STRING field writes to and reads back from a text column")
+    void testString() {
+        createTable("string_test", "text");
+        final RecordSchema schema = schemaFor(new RecordField("value_field", RecordFieldType.STRING.getDataType()));
+        final MapRecord record = new MapRecord(schema, Map.of("id", 1, "value_field", "hello world"));
+
+        assertDoesNotThrow(() -> sessionProvider.insert(new QualifiedTableName(null, "string_test"), record, Map.of(), WriteOverrides.NONE));
+
+        assertEquals("hello world", readBack("string_test", "value_field", 1).getValue("value_field"));
+    }
+
+    @Test
+    @DisplayName("A record with an ARRAY of STRING field holding a List writes to and reads back from a list<text> column")
+    void testArray() {
+        createTable("array_test", "list<text>");
+        final RecordSchema schema = schemaFor(
+                new RecordField("value_field", RecordFieldType.ARRAY.getArrayDataType(RecordFieldType.STRING.getDataType())));
+        final List<String> expected = List.of("a", "b", "c");
+        final MapRecord record = new MapRecord(schema, Map.of("id", 1, "value_field", expected));
+
+        assertDoesNotThrow(() -> sessionProvider.insert(new QualifiedTableName(null, "array_test"), record, Map.of(), WriteOverrides.NONE));
+
+        assertEquals(expected, readBack("array_test", "value_field", 1).getValue("value_field"));
+    }
+
+    @Test
+    @DisplayName("A record with an ARRAY of STRING field holding an Object[] writes to and reads back from a list<text> column")
+    void testArrayFromObjectArrayIsCoerced() {
+        // Object[] is NiFi's own canonical ARRAY representation (DataTypeUtils#toArray always returns one),
+        // unlike the List used by testArray, so this exercises that path specifically.
+        createTable("array_object_array_test", "list<text>");
+        final RecordSchema schema = schemaFor(
+                new RecordField("value_field", RecordFieldType.ARRAY.getArrayDataType(RecordFieldType.STRING.getDataType())));
+        final MapRecord record = new MapRecord(schema, Map.of("id", 1, "value_field", new Object[] {"a", "b", "c"}));
+
+        assertDoesNotThrow(() -> sessionProvider.insert(new QualifiedTableName(null, "array_object_array_test"), record, Map.of(), WriteOverrides.NONE));
+
+        assertEquals(List.of("a", "b", "c"), readBack("array_object_array_test", "value_field", 1).getValue("value_field"));
+    }
+
+    @Test
+    @DisplayName("A record with an ARRAY of STRING field holding a Set writes to and reads back from a set<text> column")
+    void testSetOfString() {
+        createTable("set_test", "set<text>");
+        final RecordSchema schema = schemaFor(
+                new RecordField("value_field", RecordFieldType.ARRAY.getArrayDataType(RecordFieldType.STRING.getDataType())));
+        final Set<String> expected = Set.of("a", "b", "c");
+        final MapRecord record = new MapRecord(schema, Map.of("id", 1, "value_field", expected));
+
+        assertDoesNotThrow(() -> sessionProvider.insert(new QualifiedTableName(null, "set_test"), record, Map.of(), WriteOverrides.NONE));
+
+        assertEquals(expected, readBack("set_test", "value_field", 1).getValue("value_field"));
+    }
+
+    @Test
+    @DisplayName("A record with a MAP of STRING field writes to and reads back from a map<text, text> column")
+    void testMap() {
+        createTable("map_test", "map<text, text>");
+        final RecordSchema schema = schemaFor(new RecordField("value_field", RecordFieldType.MAP.getMapDataType(RecordFieldType.STRING.getDataType())));
+        final Map<String, String> expected = Map.of("key1", "value1", "key2", "value2");
+        final MapRecord record = new MapRecord(schema, Map.of("id", 1, "value_field", expected));
+
+        assertDoesNotThrow(() -> sessionProvider.insert(new QualifiedTableName(null, "map_test"), record, Map.of(), WriteOverrides.NONE));
+
+        assertEquals(expected, readBack("map_test", "value_field", 1).getValue("value_field"));
+    }
+
+    @Test
+    @DisplayName("A record with a MAP of RECORD field writes a map of UDT values to and reads it back")
+    void testMapOfAddressUserDefinedType() {
+        executeDdlWithRetry("create type if not exists " + keyspace + ".address_map_item (street_address text, state text, zip_code int)");
+        executeDdlWithRetry(String.format("create table if not exists %s.address_map_test (id int primary key, addresses map<text, frozen<address_map_item>>)", keyspace));
+
+        final RecordSchema addressSchema = new SimpleRecordSchema(List.of(
+                new RecordField("street_address", RecordFieldType.STRING.getDataType()),
+                new RecordField("state", RecordFieldType.STRING.getDataType()),
+                new RecordField("zip_code", RecordFieldType.INT.getDataType())
+        ));
+        final RecordSchema schema = schemaFor(new RecordField("addresses",
+                RecordFieldType.MAP.getMapDataType(RecordFieldType.RECORD.getRecordDataType(addressSchema))));
+
+        final MapRecord home = new MapRecord(addressSchema, Map.of("street_address", "123 Main St", "state", "NC", "zip_code", 27601));
+        final MapRecord work = new MapRecord(addressSchema, Map.of("street_address", "456 Elm St", "state", "SC", "zip_code", 29401));
+        final MapRecord record = new MapRecord(schema, Map.of("id", 1, "addresses", Map.of("home", home, "work", work)));
+
+        assertDoesNotThrow(() -> sessionProvider.insert(new QualifiedTableName(null, "address_map_test"), record, Map.of(), WriteOverrides.NONE));
+
+        final Object addresses = readBack("address_map_test", "addresses", 1).getValue("addresses");
+        assertInstanceOf(Map.class, addresses);
+        @SuppressWarnings("unchecked")
+        final Map<String, UdtValue> addressMap = (Map<String, UdtValue>) addresses;
+        assertEquals("123 Main St", addressMap.get("home").getString("street_address"));
+        assertEquals("456 Elm St", addressMap.get("work").getString("street_address"));
+    }
+
+    @Test
+    @DisplayName("A record with a RECORD field for a Home Address writes a UDT and reads it back")
+    void testHomeAddressUserDefinedType() {
+        executeDdlWithRetry("create type if not exists " + keyspace + ".home_address (street_address text, state text, zip_code int)");
+        executeDdlWithRetry(String.format("create table if not exists %s.home_address_test (id int primary key, home_address frozen<home_address>)", keyspace));
+
+        final RecordSchema addressSchema = new SimpleRecordSchema(List.of(
+                new RecordField("street_address", RecordFieldType.STRING.getDataType()),
+                new RecordField("state", RecordFieldType.STRING.getDataType()),
+                new RecordField("zip_code", RecordFieldType.INT.getDataType())
+        ));
+        final RecordSchema schema = schemaFor(new RecordField("home_address", RecordFieldType.RECORD.getRecordDataType(addressSchema)));
+
+        // A plain nested MapRecord, exactly like what a RecordReader (JSON, Avro, etc.) would produce for a
+        // nested object - the session provider is responsible for converting this into the UdtValue the
+        // DataStax driver's codec requires.
+        final MapRecord homeAddress = new MapRecord(addressSchema, Map.of(
+                "street_address", "123 Main St",
+                "state", "NC",
+                "zip_code", 27601));
+
+        final MapRecord record = new MapRecord(schema, Map.of("id", 1, "home_address", homeAddress));
+
+        assertDoesNotThrow(() -> sessionProvider.insert(new QualifiedTableName(null, "home_address_test"), record, Map.of(), WriteOverrides.NONE));
+
+        final Object readValue = readBack("home_address_test", "home_address", 1).getValue("home_address");
+        assertInstanceOf(UdtValue.class, readValue);
+        final UdtValue udtValue = (UdtValue) readValue;
+        assertEquals("123 Main St", udtValue.getString("street_address"));
+        assertEquals("NC", udtValue.getString("state"));
+        assertEquals(27601, udtValue.getInt("zip_code"));
+    }
+
+    @Test
+    @DisplayName("A record with a RECORD field holding a raw Map writes a UDT and reads it back")
+    void testHomeAddressFromRawMapIsCoerced() {
+        // A raw Map is the other representation DataTypeUtils#toRecord accepts for a RECORD field, alongside
+        // the nested Record used by testHomeAddressUserDefinedType, so this exercises that path specifically.
+        executeDdlWithRetry("create type if not exists " + keyspace + ".address_from_map_item (street_address text, state text, zip_code int)");
+        executeDdlWithRetry(String.format(
+                "create table if not exists %s.address_from_map_test (id int primary key, home_address frozen<address_from_map_item>)", keyspace));
+
+        final RecordSchema addressSchema = new SimpleRecordSchema(List.of(
+                new RecordField("street_address", RecordFieldType.STRING.getDataType()),
+                new RecordField("state", RecordFieldType.STRING.getDataType()),
+                new RecordField("zip_code", RecordFieldType.INT.getDataType())
+        ));
+        final RecordSchema schema = schemaFor(new RecordField("home_address", RecordFieldType.RECORD.getRecordDataType(addressSchema)));
+
+        final Map<String, Object> homeAddress = Map.of("street_address", "123 Main St", "state", "NC", "zip_code", 27601);
+        final MapRecord record = new MapRecord(schema, Map.of("id", 1, "home_address", homeAddress));
+
+        assertDoesNotThrow(() -> sessionProvider.insert(new QualifiedTableName(null, "address_from_map_test"), record, Map.of(), WriteOverrides.NONE));
+
+        final Object readValue = readBack("address_from_map_test", "home_address", 1).getValue("home_address");
+        assertInstanceOf(UdtValue.class, readValue);
+        final UdtValue udtValue = (UdtValue) readValue;
+        assertEquals("123 Main St", udtValue.getString("street_address"));
+        assertEquals("NC", udtValue.getString("state"));
+        assertEquals(27601, udtValue.getInt("zip_code"));
+    }
+
+    @Test
+    @DisplayName("A record with a UDT nested inside another UDT writes to and reads back without any UDT-specific code")
+    void testPersonWithNestedAddressUserDefinedType() {
+        // Deliberately different names, field count, casing, and nesting depth than testHomeAddressUserDefinedType:
+        // this proves the RECORD-to-UdtValue conversion is driven entirely by the driver's live UDT metadata
+        // rather than any UDT-specific code, since it also has to recurse into a UDT nested inside another UDT.
+        // Quoting "firstName"/"lastName"/"zipCode" preserves their camelCase spelling; CQL would otherwise fold
+        // unquoted identifiers to lowercase.
+        executeDdlWithRetry("create type if not exists " + keyspace + ".address (street text, state text, \"zipCode\" int)");
+        executeDdlWithRetry("create type if not exists " + keyspace + ".person (\"firstName\" text, \"lastName\" text, address frozen<address>)");
+        executeDdlWithRetry(String.format("create table if not exists %s.person_test (id int primary key, person frozen<person>)", keyspace));
+
+        final RecordSchema addressSchema = new SimpleRecordSchema(List.of(
+                new RecordField("street", RecordFieldType.STRING.getDataType()),
+                new RecordField("state", RecordFieldType.STRING.getDataType()),
+                new RecordField("zipCode", RecordFieldType.INT.getDataType())
+        ));
+        final RecordSchema personSchema = new SimpleRecordSchema(List.of(
+                new RecordField("firstName", RecordFieldType.STRING.getDataType()),
+                new RecordField("lastName", RecordFieldType.STRING.getDataType()),
+                new RecordField("address", RecordFieldType.RECORD.getRecordDataType(addressSchema))
+        ));
+        final RecordSchema schema = schemaFor(new RecordField("person", RecordFieldType.RECORD.getRecordDataType(personSchema)));
+
+        final MapRecord address = new MapRecord(addressSchema, Map.of(
+                "street", "123 Main St",
+                "state", "NC",
+                "zipCode", 27601));
+        final MapRecord person = new MapRecord(personSchema, Map.of(
+                "firstName", "John",
+                "lastName", "Doe",
+                "address", address));
+        final MapRecord record = new MapRecord(schema, Map.of("id", 1, "person", person));
+
+        assertDoesNotThrow(() -> sessionProvider.insert(new QualifiedTableName(null, "person_test"), record, Map.of(), WriteOverrides.NONE));
+
+        final Object readValue = readBack("person_test", "person", 1).getValue("person");
+        assertInstanceOf(UdtValue.class, readValue);
+        final UdtValue personValue = (UdtValue) readValue;
+        assertEquals("John", personValue.getString("firstName"));
+        assertEquals("Doe", personValue.getString("lastName"));
+        final UdtValue addressValue = personValue.getUdtValue("address");
+        assertEquals("123 Main St", addressValue.getString("street"));
+        assertEquals("NC", addressValue.getString("state"));
+        assertEquals(27601, addressValue.getInt("zipCode"));
+    }
+
+    @Test
+    @DisplayName("A record with an ARRAY of RECORD field writes a list of UDTs to and reads it back")
+    void testArrayOfAddressUserDefinedType() {
+        executeDdlWithRetry("create type if not exists " + keyspace + ".address_item (street_address text, state text, zip_code int)");
+        executeDdlWithRetry(String.format("create table if not exists %s.address_array_test (id int primary key, addresses list<frozen<address_item>>)", keyspace));
+
+        final RecordSchema addressSchema = new SimpleRecordSchema(List.of(
+                new RecordField("street_address", RecordFieldType.STRING.getDataType()),
+                new RecordField("state", RecordFieldType.STRING.getDataType()),
+                new RecordField("zip_code", RecordFieldType.INT.getDataType())
+        ));
+        final RecordSchema schema = schemaFor(new RecordField("addresses",
+                RecordFieldType.ARRAY.getArrayDataType(RecordFieldType.RECORD.getRecordDataType(addressSchema))));
+
+        final MapRecord addressOne = new MapRecord(addressSchema, Map.of("street_address", "123 Main St", "state", "NC", "zip_code", 27601));
+        final MapRecord addressTwo = new MapRecord(addressSchema, Map.of("street_address", "456 Elm St", "state", "SC", "zip_code", 29401));
+        final MapRecord record = new MapRecord(schema, Map.of("id", 1, "addresses", List.of(addressOne, addressTwo)));
+
+        assertDoesNotThrow(() -> sessionProvider.insert(new QualifiedTableName(null, "address_array_test"), record, Map.of(), WriteOverrides.NONE));
+
+        final Object addresses = readBack("address_array_test", "addresses", 1).getValue("addresses");
+        assertInstanceOf(List.class, addresses);
+        final List<?> addressList = (List<?>) addresses;
+        assertEquals(2, addressList.size());
+        assertInstanceOf(UdtValue.class, addressList.get(0));
+        assertEquals("123 Main St", ((UdtValue) addressList.get(0)).getString("street_address"));
+        assertEquals("456 Elm St", ((UdtValue) addressList.get(1)).getString("street_address"));
+    }
+
+    @Test
+    @DisplayName("A record with an ARRAY of RECORD field writes a list of UDTs nested inside other UDTs to and reads it back")
+    void testArrayOfPersonWithNestedAddressUserDefinedType() {
+        executeDdlWithRetry("create type if not exists " + keyspace + ".address_nested_item (street text, state text, \"zipCode\" int)");
+        executeDdlWithRetry("create type if not exists " + keyspace + ".person_nested_item (\"firstName\" text, \"lastName\" text, address frozen<address_nested_item>)");
+        executeDdlWithRetry(String.format("create table if not exists %s.person_array_test (id int primary key, people list<frozen<person_nested_item>>)", keyspace));
+
+        final RecordSchema addressSchema = new SimpleRecordSchema(List.of(
+                new RecordField("street", RecordFieldType.STRING.getDataType()),
+                new RecordField("state", RecordFieldType.STRING.getDataType()),
+                new RecordField("zipCode", RecordFieldType.INT.getDataType())
+        ));
+        final RecordSchema personSchema = new SimpleRecordSchema(List.of(
+                new RecordField("firstName", RecordFieldType.STRING.getDataType()),
+                new RecordField("lastName", RecordFieldType.STRING.getDataType()),
+                new RecordField("address", RecordFieldType.RECORD.getRecordDataType(addressSchema))
+        ));
+        final RecordSchema schema = schemaFor(new RecordField("people",
+                RecordFieldType.ARRAY.getArrayDataType(RecordFieldType.RECORD.getRecordDataType(personSchema))));
+
+        final MapRecord addressOne = new MapRecord(addressSchema, Map.of("street", "123 Main St", "state", "NC", "zipCode", 27601));
+        final MapRecord personOne = new MapRecord(personSchema, Map.of("firstName", "John", "lastName", "Doe", "address", addressOne));
+
+        final MapRecord addressTwo = new MapRecord(addressSchema, Map.of("street", "456 Elm St", "state", "SC", "zipCode", 29401));
+        final MapRecord personTwo = new MapRecord(personSchema, Map.of("firstName", "Jane", "lastName", "Smith", "address", addressTwo));
+
+        final MapRecord record = new MapRecord(schema, Map.of("id", 1, "people", List.of(personOne, personTwo)));
+
+        assertDoesNotThrow(() -> sessionProvider.insert(new QualifiedTableName(null, "person_array_test"), record, Map.of(), WriteOverrides.NONE));
+
+        final Object people = readBack("person_array_test", "people", 1).getValue("people");
+        assertInstanceOf(List.class, people);
+        final List<?> peopleList = (List<?>) people;
+        assertEquals(2, peopleList.size());
+
+        final UdtValue firstPerson = (UdtValue) peopleList.get(0);
+        assertEquals("John", firstPerson.getString("firstName"));
+        assertEquals("123 Main St", firstPerson.getUdtValue("address").getString("street"));
+
+        final UdtValue secondPerson = (UdtValue) peopleList.get(1);
+        assertEquals("Jane", secondPerson.getString("firstName"));
+        assertEquals("456 Elm St", secondPerson.getUdtValue("address").getString("street"));
+    }
+
+    @Test
+    @DisplayName("A record with a BOOLEAN field holding a String value is coerced and reads back as a Boolean")
+    void testBooleanFromStringIsCoerced() {
+        createTable("boolean_coercion_test", "boolean");
+        final RecordSchema schema = schemaFor(new RecordField("value_field", RecordFieldType.BOOLEAN.getDataType()));
+        final MapRecord record = new MapRecord(schema, Map.of("id", 1, "value_field", "true"));
+
+        assertDoesNotThrow(() -> sessionProvider.insert(new QualifiedTableName(null, "boolean_coercion_test"), record, Map.of(), WriteOverrides.NONE));
+
+        // Reading back a genuine Boolean (not the original String) proves the coercion actually took effect.
+        assertEquals(Boolean.TRUE, readBack("boolean_coercion_test", "value_field", 1).getValue("value_field"));
+    }
+
+    @Test
+    @DisplayName("A record with an INT field holding a String or a mismatched Number is coerced and reads back as an Integer")
+    void testIntFromStringOrMismatchedNumberIsCoerced() {
+        createTable("int_coercion_test", "int");
+        final RecordSchema schema = schemaFor(new RecordField("value_field", RecordFieldType.INT.getDataType()));
+
+        final MapRecord fromString = new MapRecord(schema, Map.of("id", 1, "value_field", "123456"));
+        assertDoesNotThrow(() -> sessionProvider.insert(new QualifiedTableName(null, "int_coercion_test"), fromString, Map.of(), WriteOverrides.NONE));
+        assertEquals(123456, readBack("int_coercion_test", "value_field", 1).getValue("value_field"));
+
+        // A Short is a valid Number but not the exact Integer type the driver's INT codec requires.
+        final MapRecord fromShort = new MapRecord(schema, Map.of("id", 2, "value_field", (short) 1234));
+        assertDoesNotThrow(() -> sessionProvider.insert(new QualifiedTableName(null, "int_coercion_test"), fromShort, Map.of(), WriteOverrides.NONE));
+        assertEquals(1234, readBack("int_coercion_test", "value_field", 2).getValue("value_field"));
+    }
+
+    @Test
+    @DisplayName("A record with a UUID field holding a String value is coerced and reads back as a UUID")
+    void testUuidFromStringIsCoerced() {
+        createTable("uuid_coercion_test", "uuid");
+        final RecordSchema schema = schemaFor(new RecordField("value_field", RecordFieldType.UUID.getDataType()));
+        final UUID expected = UUID.randomUUID();
+        final MapRecord record = new MapRecord(schema, Map.of("id", 1, "value_field", expected.toString()));
+
+        assertDoesNotThrow(() -> sessionProvider.insert(new QualifiedTableName(null, "uuid_coercion_test"), record, Map.of(), WriteOverrides.NONE));
+
+        assertEquals(expected, readBack("uuid_coercion_test", "value_field", 1).getValue("value_field"));
+    }
+
+    @Test
+    @DisplayName("A record with a CHAR field holding a Character instance is coerced and reads back as text")
+    void testCharFromCharacterInstanceIsCoerced() {
+        createTable("char_coercion_test", "text");
+        final RecordSchema schema = schemaFor(new RecordField("value_field", RecordFieldType.CHAR.getDataType()));
+        final MapRecord record = new MapRecord(schema, Map.of("id", 1, "value_field", 'A'));
+
+        assertDoesNotThrow(() -> sessionProvider.insert(new QualifiedTableName(null, "char_coercion_test"), record, Map.of(), WriteOverrides.NONE));
+
+        assertEquals("A", readBack("char_coercion_test", "value_field", 1).getValue("value_field"));
+    }
+
+    @Test
+    @DisplayName("A record with a DATE field holding a java.sql.Date value is coerced and reads back correctly via JavaSQLDateCodec")
+    void testDateFromSqlDateIsCoerced() {
+        createTable("date_coercion_test", "date");
+        final RecordSchema schema = schemaFor(new RecordField("value_field", RecordFieldType.DATE.getDataType()));
+        final Date sqlDate = Date.valueOf(LocalDate.of(2024, 3, 15));
+        final MapRecord record = new MapRecord(schema, Map.of("id", 1, "value_field", sqlDate));
+
+        assertDoesNotThrow(() -> sessionProvider.insert(new QualifiedTableName(null, "date_coercion_test"), record, Map.of(), WriteOverrides.NONE));
+
+        // Reads go through the driver's default DATE codec (LocalDate), since registering JavaSQLDateCodec adds
+        // an additional codec usable for binding a java.sql.Date value, but doesn't replace the driver's default
+        // for untyped reads like Row.getObject(int).
+        assertEquals(sqlDate.toLocalDate(), readBack("date_coercion_test", "value_field", 1).getValue("value_field"));
+    }
+
+    @Test
+    @DisplayName("A record with a TIME field holding a java.sql.Time value is coerced and reads back correctly via JavaSQLTimeCodec")
+    void testTimeFromSqlTimeIsCoerced() {
+        createTable("time_coercion_test", "time");
+        final RecordSchema schema = schemaFor(new RecordField("value_field", RecordFieldType.TIME.getDataType()));
+        final Time sqlTime = Time.valueOf(LocalTime.of(13, 45, 30));
+        final MapRecord record = new MapRecord(schema, Map.of("id", 1, "value_field", sqlTime));
+
+        assertDoesNotThrow(() -> sessionProvider.insert(new QualifiedTableName(null, "time_coercion_test"), record, Map.of(), WriteOverrides.NONE));
+
+        // Reads go through the driver's default TIME codec (LocalTime) for the same reason as
+        // testDateFromSqlDateIsCoerced above.
+        assertEquals(sqlTime.toLocalTime(), readBack("time_coercion_test", "value_field", 1).getValue("value_field"));
+    }
+}

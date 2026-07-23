@@ -19,9 +19,16 @@ package org.apache.nifi.service.cql.api;
 
 import org.apache.nifi.serialization.record.Record;
 
-import java.util.List;
-
+/**
+ * Receives {@link CQLExecutionService#query} results one row at a time, so a caller can begin acting on rows
+ * (for example, writing them to a FlowFile) before the whole result set has been fetched.
+ */
 public interface CQLQueryCallback {
-    void receive(long rowNumber,
-                 Record result, List<CQLFieldInfo> fieldInfo, boolean isExhausted);
+    /**
+     * @param rowNumber the 1-based position of {@code result} within this query's result set
+     * @param result a single row, converted to a {@link Record} using a schema derived from the result set's
+     * own column metadata
+     * @param isExhausted {@code true} if this is the last row in the result set
+     */
+    void receive(long rowNumber, Record result, boolean isExhausted);
 }

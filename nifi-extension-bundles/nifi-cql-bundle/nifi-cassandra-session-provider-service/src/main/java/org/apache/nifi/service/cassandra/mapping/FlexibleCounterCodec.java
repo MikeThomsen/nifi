@@ -42,7 +42,9 @@ public class FlexibleCounterCodec implements TypeCodec<Number> {
 
     @Override
     public ByteBuffer encode(Number value, ProtocolVersion protocolVersion) {
-        if (value == null) return null;
+        if (value == null) {
+            return null;
+        }
         return inner.encode(value.longValue(), protocolVersion);
     }
 
