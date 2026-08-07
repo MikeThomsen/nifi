@@ -61,6 +61,12 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 public class PutCQLRecordTest {
+    // The batch type the processor resolves when Batch Statement Type is left alone. Most tests below are
+    // about something else entirely - batching, TTL, primary key overrides - and only need to name the batch
+    // type because it is part of the service call they verify, so they refer to this rather than repeating a
+    // literal. testDefaultBatchStatementType is the one test that actually asserts what the default is.
+    private static final CqlBatchType DEFAULT_BATCH_TYPE = CqlBatchType.UNLOGGED;
+
     private TestRunner runner;
     private CQLExecutionService service;
     private MockRecordParser mockReader;
@@ -105,7 +111,13 @@ public class PutCQLRecordTest {
         runner.assertAllFlowFilesTransferred(PutCQLRecord.REL_SUCCESS, 1);
 
         verify(service, times(batchCount))
-                .insert(eq(new QualifiedTableName(null, "message")), anyList(), anyMap(), eq(CqlBatchType.LOGGED), eq(WriteOverrides.NONE));
+                .insert(eq(new QualifiedTableName(null, "message")), anyList(), anyMap(), eq(DEFAULT_BATCH_TYPE), eq(WriteOverrides.NONE));
+    }
+
+    @Test
+    @DisplayName("Batch Statement Type defaults to UNLOGGED, so bulk writes do not pay for the distributed batchlog unless asked to")
+    void testDefaultBatchStatementType() {
+        assertEquals(DEFAULT_BATCH_TYPE.name(), PutCQLRecord.BATCH_STATEMENT_TYPE.getDefaultValue());
     }
 
     @DisplayName("Updating records with each update method and batch statement type produces the expected batched calls")
@@ -150,7 +162,7 @@ public class PutCQLRecordTest {
         runner.assertAllFlowFilesTransferred(PutCQLRecord.REL_SUCCESS, 1);
 
         verify(service, times(1))
-                .update(eq(new QualifiedTableName(null, "message")), anyList(), anyMap(), eq(List.of("sender")), eq(UpdateMethod.SET), eq(CqlBatchType.LOGGED), eq(WriteOverrides.NONE));
+                .update(eq(new QualifiedTableName(null, "message")), anyList(), anyMap(), eq(List.of("sender")), eq(UpdateMethod.SET), eq(DEFAULT_BATCH_TYPE), eq(WriteOverrides.NONE));
     }
 
     @Test
@@ -167,7 +179,7 @@ public class PutCQLRecordTest {
         runner.assertAllFlowFilesTransferred(PutCQLRecord.REL_SUCCESS, 1);
 
         verify(service, times(1))
-                .insert(eq(new QualifiedTableName(null, "message")), anyList(), anyMap(), eq(CqlBatchType.LOGGED), eq(new WriteOverrides(Duration.ofHours(1), null)));
+                .insert(eq(new QualifiedTableName(null, "message")), anyList(), anyMap(), eq(DEFAULT_BATCH_TYPE), eq(new WriteOverrides(Duration.ofHours(1), null)));
     }
 
     @Test
@@ -186,7 +198,7 @@ public class PutCQLRecordTest {
         runner.assertAllFlowFilesTransferred(PutCQLRecord.REL_SUCCESS, 1);
 
         verify(service, times(1))
-                .update(eq(new QualifiedTableName(null, "message")), anyList(), anyMap(), eq(List.of("sender")), eq(UpdateMethod.SET), eq(CqlBatchType.LOGGED), eq(new WriteOverrides(Duration.ofMinutes(30), null)));
+                .update(eq(new QualifiedTableName(null, "message")), anyList(), anyMap(), eq(List.of("sender")), eq(UpdateMethod.SET), eq(DEFAULT_BATCH_TYPE), eq(new WriteOverrides(Duration.ofMinutes(30), null)));
     }
 
     @Test
@@ -203,7 +215,7 @@ public class PutCQLRecordTest {
         runner.assertAllFlowFilesTransferred(PutCQLRecord.REL_SUCCESS, 1);
 
         verify(service, times(1))
-                .insert(eq(new QualifiedTableName(null, "message")), anyList(), anyMap(), eq(CqlBatchType.LOGGED), eq(new WriteOverrides(null, "sender")));
+                .insert(eq(new QualifiedTableName(null, "message")), anyList(), anyMap(), eq(DEFAULT_BATCH_TYPE), eq(new WriteOverrides(null, "sender")));
     }
 
     @Test
@@ -379,18 +391,13 @@ public class PutCQLRecordTest {
     void testDynamicPropertyDescriptorRejectsNonQualifiedName(String propertyName) {
         PutCQLRecord processor = new PutCQLRecord();
 
-        assertThrows(IllegalArgumentException.class, () -> processor.getSupportedDynamicPropertyDescriptor(propertyName));
-    }
-
-    @Test
-    @DisplayName("Rejecting an invalid dynamic property name reports which name was invalid")
-    void testDynamicPropertyDescriptorRejectionMessageNamesTheInvalidProperty() {
-        PutCQLRecord processor = new PutCQLRecord();
-
         IllegalArgumentException exception = assertThrows(IllegalArgumentException.class,
-                () -> processor.getSupportedDynamicPropertyDescriptor("not_qualified"));
+                () -> processor.getSupportedDynamicPropertyDescriptor(propertyName));
 
-        assertTrue(exception.getMessage().contains("not_qualified"),
+        // Asserted on every case rather than once in a separate test: a user who mistypes one of several
+        // dynamic properties needs the message to say which one, and that is only useful if it holds for
+        // every rejection rather than for the one input a standalone test happened to pick.
+        assertTrue(exception.getMessage().contains(propertyName),
                 "Expected the exception message to name the invalid property, but was: " + exception.getMessage());
     }
 
@@ -410,7 +417,7 @@ public class PutCQLRecordTest {
 
         final ArgumentCaptor<Map<PrimaryKeyIdentifier, RecordPath>> captor = ArgumentCaptor.forClass(Map.class);
         verify(service).insert(eq(new QualifiedTableName("my_keyspace", "message")), anyList(), captor.capture(),
-                eq(CqlBatchType.LOGGED), eq(WriteOverrides.NONE));
+                eq(DEFAULT_BATCH_TYPE), eq(WriteOverrides.NONE));
 
         final Map<PrimaryKeyIdentifier, RecordPath> overrides = captor.getValue();
         final PrimaryKeyIdentifier identifier = new PrimaryKeyIdentifier("my_keyspace", "message", "id");
@@ -436,7 +443,7 @@ public class PutCQLRecordTest {
 
         final ArgumentCaptor<Map<PrimaryKeyIdentifier, RecordPath>> captor = ArgumentCaptor.forClass(Map.class);
         verify(service).insert(eq(new QualifiedTableName("my_keyspace", "message")), anyList(), captor.capture(),
-                eq(CqlBatchType.LOGGED), eq(WriteOverrides.NONE));
+                eq(DEFAULT_BATCH_TYPE), eq(WriteOverrides.NONE));
 
         final Map<PrimaryKeyIdentifier, RecordPath> overrides = captor.getValue();
         assertEquals(2, overrides.size());
@@ -460,7 +467,7 @@ public class PutCQLRecordTest {
 
         final ArgumentCaptor<Map<PrimaryKeyIdentifier, RecordPath>> captor = ArgumentCaptor.forClass(Map.class);
         verify(service).insert(eq(new QualifiedTableName("my_keyspace", "message")), anyList(), captor.capture(),
-                eq(CqlBatchType.LOGGED), eq(WriteOverrides.NONE));
+                eq(DEFAULT_BATCH_TYPE), eq(WriteOverrides.NONE));
 
         assertTrue(captor.getValue().isEmpty());
     }
@@ -483,7 +490,7 @@ public class PutCQLRecordTest {
 
         final ArgumentCaptor<Map<PrimaryKeyIdentifier, RecordPath>> captor = ArgumentCaptor.forClass(Map.class);
         verify(service).insert(eq(new QualifiedTableName(null, "message")), anyList(), captor.capture(),
-                eq(CqlBatchType.LOGGED), eq(WriteOverrides.NONE));
+                eq(DEFAULT_BATCH_TYPE), eq(WriteOverrides.NONE));
 
         assertTrue(captor.getValue().isEmpty());
     }
@@ -506,7 +513,7 @@ public class PutCQLRecordTest {
 
         final ArgumentCaptor<Map<PrimaryKeyIdentifier, RecordPath>> captor = ArgumentCaptor.forClass(Map.class);
         verify(service).update(eq(new QualifiedTableName("my_keyspace", "message")), anyList(), captor.capture(),
-                eq(List.of("sender")), eq(UpdateMethod.SET), eq(CqlBatchType.LOGGED), eq(WriteOverrides.NONE));
+                eq(List.of("sender")), eq(UpdateMethod.SET), eq(DEFAULT_BATCH_TYPE), eq(WriteOverrides.NONE));
 
         final Map<PrimaryKeyIdentifier, RecordPath> overrides = captor.getValue();
         final PrimaryKeyIdentifier identifier = new PrimaryKeyIdentifier("my_keyspace", "message", "id");

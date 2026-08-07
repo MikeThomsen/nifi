@@ -18,11 +18,13 @@
 package org.apache.nifi.processors.cql.mock;
 
 import org.apache.nifi.controller.AbstractControllerService;
+import org.apache.nifi.processor.exception.ProcessException;
 import org.apache.nifi.serialization.record.Record;
 import org.apache.nifi.service.cql.api.CQLExecutionService;
 import org.apache.nifi.service.cql.api.CQLQueryCallback;
 import org.apache.nifi.service.cql.api.CqlBatchType;
 import org.apache.nifi.service.cql.api.QueryOverrides;
+import org.apache.nifi.service.cql.api.exception.QueryFailureException;
 import org.apache.nifi.service.cql.api.UpdateMethod;
 import org.apache.nifi.service.cql.api.WriteOverrides;
 import org.apache.nifi.service.cql.api.metadata.PrimaryKey;
@@ -38,24 +40,84 @@ import java.util.Map;
  * This test class exists to support @see org.apache.nifi.processors.cassandra.ExecuteCQLQueryRecordTest
  */
 public class MockCQLQueryExecutionService extends AbstractControllerService implements CQLExecutionService {
+    /**
+     * Stands in for a DataStax page-fetch exception. The driver types cannot be referenced from this module,
+     * and they never reach a processor anyway - a real service translates them before they cross the
+     * {@link CQLExecutionService} boundary.
+     */
+    private static class SimulatedPageFetchFailure extends RuntimeException {
+    }
+
+    /** Sentinel for {@link #rowsBeforeFailure} meaning "deliver the whole result set successfully". */
+    private static final int NEVER_FAIL = -1;
+
     private final Iterator<org.apache.nifi.serialization.record.Record> records;
     private QueryOverrides lastQueryOverrides;
+    private String lastCql;
+    private List<Object> lastParameters;
+    private int rowsBeforeFailure = NEVER_FAIL;
 
     public MockCQLQueryExecutionService(Iterator<org.apache.nifi.serialization.record.Record> records) {
         this.records = records;
     }
 
+    /**
+     * Makes {@link #query} deliver {@code rowsBeforeFailure} rows and then fail, the way a page fetch does
+     * partway through a large result set. Every row delivered in this mode reports {@code hasMore = true},
+     * since by definition the result set was not exhausted. Pass {@code 0} to fail before any row arrives.
+     *
+     * @return this service, for chaining onto the constructor
+     */
+    public MockCQLQueryExecutionService failAfter(final int rowsBeforeFailure) {
+        this.rowsBeforeFailure = rowsBeforeFailure;
+        return this;
+    }
+
+    /**
+     * Mirrors the structure of a real implementation's {@code query}, not just its happy path: the entire row
+     * loop sits inside the try, so an exception thrown by the <em>callback</em> - a record writer that fails
+     * mid-result-set, say - is caught here too, gets {@link CQLQueryCallback#clear()} called on it, and is
+     * rethrown as a {@link ProcessException}. Cleanup on that path is easy to get wrong, and a mock that let
+     * the callback's exception escape untouched would never exercise it.
+     */
     @Override
-    public void query(String cql, boolean cacheStatement, List parameters, CQLQueryCallback callback, QueryOverrides overrides) {
+    public void query(String cql, List<Object> parameters, CQLQueryCallback callback, QueryOverrides overrides) throws QueryFailureException {
         this.lastQueryOverrides = overrides;
-        long rowNumber = 1;
-        while (records.hasNext()) {
-            callback.receive(rowNumber++, records.next(), records.hasNext());
+        this.lastCql = cql;
+        this.lastParameters = parameters;
+
+        final boolean failing = rowsBeforeFailure != NEVER_FAIL;
+
+        try {
+            long rowNumber = 0;
+
+            while (records.hasNext() && (!failing || rowNumber < rowsBeforeFailure)) {
+                final org.apache.nifi.serialization.record.Record next = records.next();
+                callback.receive(++rowNumber, next, failing || records.hasNext());
+            }
+
+            if (failing) {
+                throw new SimulatedPageFetchFailure();
+            }
+        } catch (final SimulatedPageFetchFailure e) {
+            callback.clear();
+            throw new QueryFailureException();
+        } catch (final Exception ex) {
+            callback.clear();
+            throw new ProcessException("Error querying CQL", ex);
         }
     }
 
     public QueryOverrides getLastQueryOverrides() {
         return lastQueryOverrides;
+    }
+
+    public String getLastCql() {
+        return lastCql;
+    }
+
+    public List<Object> getLastParameters() {
+        return lastParameters;
     }
 
     @Override

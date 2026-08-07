@@ -20,6 +20,7 @@ import com.datastax.oss.driver.api.core.AllNodesFailedException;
 import com.datastax.oss.driver.api.core.CqlIdentifier;
 import com.datastax.oss.driver.api.core.CqlSession;
 import com.datastax.oss.driver.api.core.CqlSessionBuilder;
+import com.datastax.oss.driver.api.core.DriverTimeoutException;
 import com.datastax.oss.driver.api.core.config.DefaultDriverOption;
 import com.datastax.oss.driver.api.core.config.DriverConfigLoader;
 import com.datastax.oss.driver.api.core.cql.BatchStatement;
@@ -32,7 +33,6 @@ import com.datastax.oss.driver.api.core.cql.ResultSet;
 import com.datastax.oss.driver.api.core.cql.Row;
 import com.datastax.oss.driver.api.core.cql.SimpleStatement;
 import com.datastax.oss.driver.api.core.cql.SimpleStatementBuilder;
-import com.datastax.oss.driver.api.core.cql.Statement;
 import com.datastax.oss.driver.api.core.data.UdtValue;
 import com.datastax.oss.driver.api.core.metadata.schema.ColumnMetadata;
 import com.datastax.oss.driver.api.core.metadata.schema.KeyspaceMetadata;
@@ -58,6 +58,7 @@ import org.apache.avro.Schema;
 import org.apache.avro.SchemaBuilder;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.nifi.annotation.documentation.CapabilityDescription;
+import org.apache.nifi.annotation.documentation.SeeAlso;
 import org.apache.nifi.annotation.documentation.Tags;
 import org.apache.nifi.annotation.lifecycle.OnDisabled;
 import org.apache.nifi.annotation.lifecycle.OnEnabled;
@@ -110,6 +111,7 @@ import java.io.File;
 import java.net.InetSocketAddress;
 import java.time.Duration;
 import java.time.Instant;
+import java.time.format.DateTimeParseException;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicReference;
@@ -118,11 +120,17 @@ import java.util.stream.Collectors;
 import java.util.stream.Stream;
 import javax.net.ssl.SSLContext;
 
-import static org.bouncycastle.oer.its.ieee1609dot2.CertificateId.name;
-
-
-@Tags({"cassandra", "dbcp", "database", "connection", "pooling"})
+@Tags({"cassandra", "cql", "database", "connection", "session", "pooling"})
 @CapabilityDescription("Provides connection session for Cassandra processors to work with Apache Cassandra.")
+// Referenced by name rather than by class: a session provider has no business depending on the modules that consume
+// it, and nifi-cql-processors in particular could not accept the dependency - the driver this module carries is what
+// its ban-database-client-dependencies enforcer rule exists to keep out.
+@SeeAlso(classNames = {
+        "org.apache.nifi.processors.cql.PutCQLRecord",
+        "org.apache.nifi.processors.cql.ExecuteCQLQueryRecord",
+        "org.apache.nifi.service.cql.CQLDistributedMapCache",
+        "org.apache.nifi.service.scylladb.ScyllaDBCQLExecutionService"
+})
 public class CassandraCQLExecutionService extends AbstractControllerService implements CQLExecutionService, VerifiableControllerService {
 
     public static final int DEFAULT_CASSANDRA_PORT = 9042;
@@ -137,15 +145,12 @@ public class CassandraCQLExecutionService extends AbstractControllerService impl
 
     private CqlSession cassandraSession;
 
-    private Map<String, PreparedStatement> statementCache;
-
     private int pageSize;
 
     private Duration defaultTtl;
 
     public static final List<PropertyDescriptor> PROPERTY_DESCRIPTORS = List.of(
             CONTACT_POINTS,
-            CLIENT_AUTH,
             DATACENTER,
             KEYSPACE,
             USERNAME,
@@ -202,23 +207,28 @@ public class CassandraCQLExecutionService extends AbstractControllerService impl
 
             final CqlSession cqlSession = buildSession(context);
 
-            MutableCodecRegistry codecRegistry =
-                    (MutableCodecRegistry) cqlSession.getContext().getCodecRegistry();
+            try {
+                MutableCodecRegistry codecRegistry =
+                        (MutableCodecRegistry) cqlSession.getContext().getCodecRegistry();
 
-            codecRegistry.register(new JavaSQLTimestampCodec());
-            codecRegistry.register(new JavaSQLDateCodec());
-            codecRegistry.register(new JavaSQLTimeCodec());
-            codecRegistry.register(new CharacterCodec());
-            codecRegistry.register(new FlexibleCounterCodec());
-            codecRegistry.register(new FlexibleBooleanCodec());
-            codecRegistry.register(new FlexibleTinyIntCodec());
-            codecRegistry.register(new FlexibleSmallIntCodec());
-            codecRegistry.register(new FlexibleIntCodec());
-            codecRegistry.register(new FlexibleBigIntCodec());
-            codecRegistry.register(new FlexibleFloatCodec());
-            codecRegistry.register(new FlexibleDoubleCodec());
-            codecRegistry.register(new FlexibleDateCodec());
-            codecRegistry.register(new FlexibleTimeCodec());
+                codecRegistry.register(new JavaSQLTimestampCodec());
+                codecRegistry.register(new JavaSQLDateCodec());
+                codecRegistry.register(new JavaSQLTimeCodec());
+                codecRegistry.register(new CharacterCodec());
+                codecRegistry.register(new FlexibleCounterCodec());
+                codecRegistry.register(new FlexibleBooleanCodec());
+                codecRegistry.register(new FlexibleTinyIntCodec());
+                codecRegistry.register(new FlexibleSmallIntCodec());
+                codecRegistry.register(new FlexibleIntCodec());
+                codecRegistry.register(new FlexibleBigIntCodec());
+                codecRegistry.register(new FlexibleFloatCodec());
+                codecRegistry.register(new FlexibleDoubleCodec());
+                codecRegistry.register(new FlexibleDateCodec());
+                codecRegistry.register(new FlexibleTimeCodec());
+            } catch (Exception ex) {
+                cqlSession.close();
+                throw new ProcessException("There was an error registering conversion codecs.", ex);
+            }
 
             // Create the cluster and connect to it
             cassandraSession = cqlSession;
@@ -440,7 +450,7 @@ public class CassandraCQLExecutionService extends AbstractControllerService impl
     }
 
     @Override
-    public void query(String cql, boolean cacheStatement, List parameters, CQLQueryCallback callback, QueryOverrides overrides) throws QueryFailureException {
+    public void query(String cql, List<Object> parameters, CQLQueryCallback callback, QueryOverrides overrides) throws QueryFailureException {
         SimpleStatementBuilder statementBuilder = SimpleStatement.builder(cql)
                 .setPageSize(resolveFetchSize(overrides, pageSize));
 
@@ -453,7 +463,7 @@ public class CassandraCQLExecutionService extends AbstractControllerService impl
         PreparedStatement preparedStatement = cassandraSession.prepare(statement);
 
         BoundStatement boundStatement = parameters != null && !parameters.isEmpty()
-                ? preparedStatement.bind(parameters.toArray()) : preparedStatement.bind();
+                ? preparedStatement.bind(toBindValues(preparedStatement, parameters)) : preparedStatement.bind();
 
         AtomicReference<RecordSchema> schemaReference = new AtomicReference<>();
 
@@ -492,10 +502,16 @@ public class CassandraCQLExecutionService extends AbstractControllerService impl
 
                 callback.receive(++rowNumber, record, resultsIterator.hasNext());
             }
-        } catch (QueryExecutionException | AllNodesFailedException qee) {
+        // Each of these is worth another attempt: a coordinator/replica-level execution failure, no reachable
+        // node, or a client-side request timeout. Deliberately not their DriverException base type - the
+        // validation errors under it (SyntaxError, InvalidQueryException, UnauthorizedException) can never
+        // succeed on a retry, so they belong on the failure path below.
+        } catch (QueryExecutionException | AllNodesFailedException | DriverTimeoutException qee) {
             getLogger().error("Error executing query", qee);
+            callback.clear();
             throw new QueryFailureException();
         } catch (Exception ex) {
+            callback.clear();
             throw new ProcessException("Error querying CQL", ex);
         }
     }
@@ -638,7 +654,7 @@ public class CassandraCQLExecutionService extends AbstractControllerService impl
 
         try {
             cassandraSession.execute(boundStatement);
-        } catch (QueryExecutionException | AllNodesFailedException qee) {
+        } catch (QueryExecutionException | AllNodesFailedException | DriverTimeoutException qee) {
             getLogger().error("Error executing insert", qee);
             throw new QueryFailureException();
         }
@@ -666,7 +682,7 @@ public class CassandraCQLExecutionService extends AbstractControllerService impl
 
         try {
             cassandraSession.execute(builder.build());
-        } catch (QueryExecutionException | AllNodesFailedException qee) {
+        } catch (QueryExecutionException | AllNodesFailedException | DriverTimeoutException qee) {
             getLogger().error("Error executing batch insert", qee);
             throw new QueryFailureException();
         }
@@ -716,7 +732,8 @@ public class CassandraCQLExecutionService extends AbstractControllerService impl
         return builder.endRecord();
     }
 
-    protected SimpleStatement generateDelete(QualifiedTableName cassandraTable, org.apache.nifi.serialization.record.Record record, List<String> deleteKeyNames) {
+    protected GeneratedResult generateDelete(QualifiedTableName cassandraTable, org.apache.nifi.serialization.record.Record record,
+                                             Map<PrimaryKeyIdentifier, RecordPath> primaryKeyOverrides, List<String> deleteKeyNames) {
         RecordSchema schema = record.getSchema();
 
         // Split up the update key names separated by a comma, should not be empty
@@ -724,9 +741,12 @@ public class CassandraCQLExecutionService extends AbstractControllerService impl
             throw new IllegalArgumentException("No delete keys were specified");
         }
 
-        // Verify if all update keys are present in the record
+        // Verify every delete key is either a real record field or covered by a primary key override for this
+        // table, matching generateUpdate: a key resolved purely by RecordPath has no same-named record field,
+        // but getBindValues can still resolve its value from the override alone.
+        final Set<String> overrideFieldNames = overrideFieldNamesForTable(cassandraTable, primaryKeyOverrides);
         for (String deleteKey : deleteKeyNames) {
-            if (!schema.getFieldNames().contains(deleteKey)) {
+            if (!schema.getFieldNames().contains(deleteKey) && !overrideFieldNames.contains(deleteKey)) {
                 throw new IllegalArgumentException("Delete key '" + deleteKey + "' is not present in the record schema");
             }
         }
@@ -736,12 +756,14 @@ public class CassandraCQLExecutionService extends AbstractControllerService impl
                 : QueryBuilder.deleteFrom(cassandraTable.table());
 
         List<Relation> whereCriteria = new ArrayList<>();
+        List<String> keysUsedInOrder = new ArrayList<>();
 
         for (String fieldName : deleteKeyNames) {
             whereCriteria.add(Relation.column(fieldName).isEqualTo(QueryBuilder.bindMarker(fieldName)));
+            keysUsedInOrder.add(fieldName);
         }
 
-        return deleteSelection.where(whereCriteria).build();
+        return new GeneratedResult(deleteSelection.where(whereCriteria).build(), keysUsedInOrder);
     }
 
     protected GeneratedResult generateUpdate(QualifiedTableName cassandraTable, org.apache.nifi.serialization.record.Record record, Map<PrimaryKeyIdentifier, RecordPath> primaryKeyOverrides,
@@ -821,10 +843,15 @@ public class CassandraCQLExecutionService extends AbstractControllerService impl
     @Override
     public void delete(QualifiedTableName cassandraTable, org.apache.nifi.serialization.record.Record record, Map<PrimaryKeyIdentifier, RecordPath> primaryKeyOverrides,
                         List<String> updateKeys) throws QueryFailureException {
-        Statement deleteStatement = generateDelete(cassandraTable, record, updateKeys);
+        GeneratedResult result = generateDelete(cassandraTable, record, primaryKeyOverrides, updateKeys);
+        PreparedStatement preparedStatement = cassandraSession.prepare(result.statement());
+
+        BoundStatement deleteStatement = preparedStatement.bind(
+                getBindValues(cassandraTable, primaryKeyOverrides, record, preparedStatement, result.keysUsed()));
+
         try {
             cassandraSession.execute(deleteStatement);
-        } catch (QueryExecutionException | AllNodesFailedException qee) {
+        } catch (QueryExecutionException | AllNodesFailedException | DriverTimeoutException qee) {
             getLogger().error("Error executing delete", qee);
             throw new QueryFailureException();
         }
@@ -845,7 +872,7 @@ public class CassandraCQLExecutionService extends AbstractControllerService impl
 
         try {
             cassandraSession.execute(statement);
-        } catch (QueryExecutionException | AllNodesFailedException qee) {
+        } catch (QueryExecutionException | AllNodesFailedException | DriverTimeoutException qee) {
             getLogger().error("Error executing update", qee);
             throw new QueryFailureException();
         }
@@ -885,6 +912,73 @@ public class CassandraCQLExecutionService extends AbstractControllerService impl
         return result;
     }
 
+    /**
+     * Resolves each positional query parameter to the Java type its bind marker's declared CQL type requires,
+     * reusing the same {@link #convertForCqlType} conversion the write path applies to record values. This is
+     * what lets a caller supply parameters as text - all Expression Language can produce - and still bind them
+     * to non-text columns: the {@code Flexible*Codec}s registered with the session already accept a String for
+     * the boolean, numeric, date and time types, and {@code convertForCqlType} covers uuid and timeuuid,
+     * leaving {@code timestamp} (see {@link #toInstant(Object)}) as the one scalar type needing help here.
+     *
+     * <p>A parameter count that doesn't match the statement's bind markers fails immediately with a message
+     * naming both counts, rather than reaching the driver as an unbound-marker error that doesn't say which
+     * side was wrong.
+     */
+    private Object[] toBindValues(final PreparedStatement preparedStatement, final List<Object> parameters) {
+        final ColumnDefinitions bindMarkers = preparedStatement.getVariableDefinitions();
+
+        if (bindMarkers.size() != parameters.size()) {
+            throw new IllegalArgumentException(String.format(
+                    "Query declares %d bind marker(s) but %d parameter(s) were supplied",
+                    bindMarkers.size(), parameters.size()));
+        }
+
+        final Object[] values = new Object[parameters.size()];
+
+        for (int index = 0; index < parameters.size(); index++) {
+            final DataType cqlType = bindMarkers.get(index).getType();
+            final Object value = parameters.get(index);
+
+            values[index] = cqlType.equals(DataTypes.TIMESTAMP)
+                    ? toInstant(value)
+                    : convertForCqlType(value, cqlType);
+        }
+
+        return values;
+    }
+
+    /**
+     * Converts a value bound to a {@code timestamp} column into the {@link Instant} the driver's own codec
+     * expects. Unlike the other scalar types, {@code timestamp} has no {@code Flexible*Codec} registered to
+     * coerce a compatible-but-non-exact value, so an ISO-8601 rendering - the natural form for a parameter
+     * supplied as text - would otherwise fail with the driver's opaque {@code CodecNotFoundException}.
+     */
+    static Instant toInstant(final Object value) {
+        if (value == null) {
+            return null;
+        } else if (value instanceof Instant instantValue) {
+            return instantValue;
+        } else if (value instanceof java.util.Date dateValue) {
+            return dateValue.toInstant();
+        } else if (value instanceof Number numberValue) {
+            return Instant.ofEpochMilli(numberValue.longValue());
+        }
+
+        final String text = value.toString().trim();
+
+        try {
+            return Instant.parse(text);
+        } catch (final DateTimeParseException e) {
+            try {
+                return Instant.ofEpochMilli(Long.parseLong(text));
+            } catch (final NumberFormatException ignored) {
+                throw new IllegalArgumentException(String.format(
+                        "Value '%s' cannot be bound to a timestamp column: expected an ISO-8601 instant such as "
+                                + "2026-08-07T14:30:00Z, or a count of milliseconds since the epoch", text), e);
+            }
+        }
+    }
+
     private Object evaluateOverride(Record record, RecordPath path) {
         RecordPathResult result = path.evaluate(record);
         List<FieldValue> valueList = result.getSelectedFields().toList();
@@ -908,7 +1002,6 @@ public class CassandraCQLExecutionService extends AbstractControllerService impl
                 .stream()
                 .filter((e) -> e.getKey().keyspace().equals(keyspace)
                         && e.getKey().tableName().equals(tableName.table())
-                        && e.getKey().fieldName().equals(fieldName)
                         && CqlIdentifier.fromCql(e.getKey().fieldName()).asInternal().equals(cleanFieldName))
                 .findFirst();
 
@@ -966,7 +1059,17 @@ public class CassandraCQLExecutionService extends AbstractControllerService impl
                 final String fieldName = fieldNames.get(i);
                 final DataType fieldCqlType = udtType.getFieldTypes().get(i);
                 final Object fieldValue = convertForCqlType(fieldValueLookup.apply(fieldName), fieldCqlType);
-                udtValue = udtValue.set(fieldName, fieldValue, (Class<Object>) (fieldValue == null ? Object.class : fieldValue.getClass()));
+                try {
+                    // A null field is set directly against its declared CQL type rather than through a codec
+                    // lookup. Resolving the codec from the value's runtime class cannot work when there is no
+                    // value: the lookup becomes [<field type> <-> java.lang.Object], which no codec satisfies,
+                    // and that made any UDT carrying an absent or optional field unwritable.
+                    udtValue = fieldValue == null
+                            ? udtValue.setToNull(fieldName)
+                            : udtValue.set(fieldName, fieldValue, (Class<Object>) fieldValue.getClass());
+                } catch (Exception ex) {
+                    throw new RuntimeException(ex);
+                }
             }
 
             return udtValue;
@@ -1045,7 +1148,7 @@ public class CassandraCQLExecutionService extends AbstractControllerService impl
 
         try {
             cassandraSession.execute(builder.build());
-        } catch (QueryExecutionException | AllNodesFailedException qee) {
+        } catch (QueryExecutionException | AllNodesFailedException | DriverTimeoutException qee) {
             getLogger().error("Error executing batch update", qee);
             throw new QueryFailureException();
         }

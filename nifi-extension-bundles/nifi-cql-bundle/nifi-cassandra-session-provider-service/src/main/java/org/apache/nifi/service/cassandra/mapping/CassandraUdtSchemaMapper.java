@@ -24,6 +24,7 @@ import com.datastax.oss.driver.api.core.type.ListType;
 import com.datastax.oss.driver.api.core.type.MapType;
 import com.datastax.oss.driver.api.core.type.SetType;
 import com.datastax.oss.driver.api.core.type.UserDefinedType;
+import org.apache.avro.LogicalTypes;
 import org.apache.avro.Schema;
 import org.apache.avro.SchemaBuilder;
 
@@ -40,6 +41,12 @@ import static com.datastax.oss.driver.api.core.type.DataTypes.ASCII;
  * <p>A UDT becomes a nested named Avro record whose fields are converted the same way, so a UDT nested inside
  * another UDT, or a list/set/map holding UDT values, is handled without any special-casing at the call site -
  * the same recursion that resolves a top-level column's type also resolves a UDT field's type.
+ *
+ * <p>Every CQL type converts to something - a type with no direct Avro equivalent (CQL {@code DURATION},
+ * {@code TUPLE}, {@code VECTOR}, or any future/custom type) falls back to a plain Avro string rather than
+ * failing the conversion, so one exotic column never fails an entire query. The driver's own decoded value is
+ * placed into the record unchanged in that case; {@code RecordFieldType.STRING} accepts an arbitrary object
+ * and renders it via {@code toString()} when a writer asks for one.
  */
 public final class CassandraUdtSchemaMapper {
 
@@ -108,16 +115,42 @@ public final class CassandraUdtSchemaMapper {
     private static Schema toPrimitiveAvroSchema(final DataType cqlType) {
         final SchemaBuilder.TypeBuilder<Schema> typeBuilder = SchemaBuilder.builder();
 
-        if (cqlType.equals(ASCII)
-                || cqlType.equals(DataTypes.TEXT)
-                // Nonstandard types represented as a string
-                || cqlType.equals(DataTypes.TIMESTAMP)
-                || cqlType.equals(DataTypes.TIMEUUID)
-                || cqlType.equals(DataTypes.UUID)
-                || cqlType.equals(DataTypes.INET)
-                || cqlType.equals(DataTypes.VARINT)
+        if (cqlType.equals(ASCII) || cqlType.equals(DataTypes.TEXT)) {
+            return typeBuilder.stringType();
+        }
+
+        // Declared with the Avro `uuid` logical type, so AvroTypeUtil#determineDataType resolves the record
+        // field to the native UUID type rather than STRING - matching the java.util.UUID the driver's own
+        // codec decodes the column into, with no value-side conversion needed on either side.
+        if (cqlType.equals(DataTypes.UUID) || cqlType.equals(DataTypes.TIMEUUID)) {
+            final Schema schema = Schema.create(Schema.Type.STRING);
+            LogicalTypes.uuid().addToSchema(schema);
+            return schema;
+        }
+
+        // TIMESTAMP/DATE/TIME, DECIMAL/VARINT and INET are all declared as a plain Avro string, and the
+        // driver's own decoded value (Instant/LocalDate/LocalTime, BigDecimal/BigInteger, InetAddress) is
+        // placed into the record unchanged. The declared type and the runtime class differ, but that is a
+        // supported combination rather than a defect: RecordFieldType.STRING is a *widening* type over
+        // DATE/TIME/TIMESTAMP/DECIMAL/BIGINT among others, so DataTypeUtils accepts each of these values for
+        // a string field and coerces them losslessly (a nanosecond LocalTime renders in full, for instance)
+        // if and when a downstream writer asks for a string.
+        //
+        // Declaring the native NiFi types instead is not an option here:
+        //   - TIMESTAMP/DATE/TIME are backed by java.sql.*, not java.time.*, so pairing them with the
+        //     driver's values makes DataTypeUtils#convertType throw for TIMESTAMP and silently truncate a
+        //     nanosecond TIME to whole seconds. Converting the values to java.sql.* to suit instead loses
+        //     that same sub-second precision, since CQL `time` is nanosecond-resolution and java.sql.Time is
+        //     not.
+        //   - DECIMAL would need Avro's fixed precision/scale, which CQL's arbitrary-precision `decimal`
+        //     cannot supply up front, and a native BIGINT is unreachable through the Avro round trip at all
+        //     (AvroTypeUtil maps record BIGINT to Avro string, which resolves back to record STRING).
+        //   - INET has no native NiFi record type in the first place.
+        if (cqlType.equals(DataTypes.TIMESTAMP)
                 || cqlType.equals(DataTypes.DATE)
                 || cqlType.equals(DataTypes.TIME)
+                || cqlType.equals(DataTypes.INET)
+                || cqlType.equals(DataTypes.VARINT)
                 || cqlType.equals(DataTypes.DECIMAL)) {
             return typeBuilder.stringType();
         }
@@ -149,6 +182,10 @@ public final class CassandraUdtSchemaMapper {
             return typeBuilder.bytesType();
         }
 
-        throw new IllegalArgumentException("Unsupported Cassandra data type " + cqlType + " cannot be converted to an Avro type");
+        // A CQL type with no case above - DURATION, TUPLE, VECTOR, and any future or custom type - is declared
+        // as STRING rather than failing schema generation. This used to throw IllegalArgumentException here,
+        // which failed the entire query over one exotic column; CassandraCQLExecutionService#toRecordValue
+        // converts the value to match via toString(), the same fallback DECIMAL/VARINT/INET already use.
+        return typeBuilder.stringType();
     }
 }

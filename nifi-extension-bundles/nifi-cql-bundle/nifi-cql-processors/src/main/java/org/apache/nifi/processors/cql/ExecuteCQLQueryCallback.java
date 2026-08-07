@@ -124,7 +124,9 @@ public class ExecuteCQLQueryCallback implements CQLQueryCallback {
 
     private void removeUnfinishedFlowFiles() {
         flowFileBatch.remove(currentFlowFile);
-        session.remove(currentFlowFile);
+        if (currentFlowFile != null) {
+            session.remove(currentFlowFile);
+        }
         flowFileBatch.forEach(session::remove);
         flowFileBatch.clear();
     }
@@ -195,6 +197,7 @@ public class ExecuteCQLQueryCallback implements CQLQueryCallback {
 
                 if (parentFlowFile != null) {
                     session.transfer(parentFlowFile, REL_ORIGINAL);
+                    parentFlowFile = null;
                 }
 
                 session.transfer(flowFileBatch, REL_SUCCESS);
@@ -207,5 +210,16 @@ public class ExecuteCQLQueryCallback implements CQLQueryCallback {
 
             throw new ProcessException("Error writing record", ex);
         }
+    }
+
+    @Override
+    public void clear() {
+        closeQuietly(recordWriter);
+        removeUnfinishedFlowFiles();
+    }
+
+    @Override
+    public boolean hasSentOriginal() {
+        return parentFlowFile == null;
     }
 }

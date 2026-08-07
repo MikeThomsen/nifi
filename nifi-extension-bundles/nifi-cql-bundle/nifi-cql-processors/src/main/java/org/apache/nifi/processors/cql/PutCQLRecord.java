@@ -21,10 +21,15 @@ import org.apache.nifi.annotation.behavior.DynamicProperty;
 import org.apache.nifi.annotation.behavior.InputRequirement;
 import org.apache.nifi.annotation.behavior.ReadsAttribute;
 import org.apache.nifi.annotation.behavior.ReadsAttributes;
+import org.apache.nifi.annotation.behavior.SupportsBatching;
+import org.apache.nifi.annotation.behavior.SystemResource;
+import org.apache.nifi.annotation.behavior.SystemResourceConsideration;
 import org.apache.nifi.annotation.behavior.WritesAttribute;
 import org.apache.nifi.annotation.behavior.WritesAttributes;
 import org.apache.nifi.annotation.documentation.CapabilityDescription;
+import org.apache.nifi.annotation.documentation.SeeAlso;
 import org.apache.nifi.annotation.documentation.Tags;
+import org.apache.nifi.annotation.documentation.UseCase;
 import org.apache.nifi.annotation.lifecycle.OnEnabled;
 import org.apache.nifi.annotation.lifecycle.OnScheduled;
 import org.apache.nifi.annotation.lifecycle.OnShutdown;
@@ -110,6 +115,73 @@ import static org.apache.nifi.processors.cql.constants.UpdateType.INCR_TYPE;
                 + "value; zero or more than one is a configuration error for that record. See 'Additional Details' for "
                 + "the full name format and examples, including how to supply a valid version-1 (time-based) UUID for "
                 + "a timeuuid primary key column.")
+@SupportsBatching
+@SystemResourceConsideration(resource = SystemResource.MEMORY,
+        description = "Up to 'Batch size' records are held in memory at once, per concurrent task, in their parsed form "
+                + "rather than as the FlowFile's serialized bytes. Raising Batch size or the number of concurrent tasks "
+                + "raises heap use proportionally.")
+@SeeAlso(
+        value = {ExecuteCQLQueryRecord.class},
+        // The session provider services cannot be referenced by class: this module is barred from depending on either
+        // of them - and so on the database drivers they carry - by the ban-database-client-dependencies enforcer rule.
+        classNames = {
+                "org.apache.nifi.service.cassandra.CassandraCQLExecutionService",
+                "org.apache.nifi.service.scylladb.ScyllaDBCQLExecutionService"
+        })
+@UseCase(
+        description = "Insert records from a FlowFile into a Cassandra or ScyllaDB table.",
+        keywords = {"cassandra", "scylladb", "cql", "insert", "record"},
+        configuration = """
+                Configure a Record Reader appropriate to the incoming data and point "Cassandra Connection Provider" at \
+                the session provider service for the cluster.
+
+                Set "Table name" to the target table, either as <keyspace>.<table> or as an unqualified <table> if the \
+                connection service already names a keyspace.
+
+                Leave "Statement Type" at INSERT. Each record field is matched to the column of the same name; use a \
+                <keyspace>.<table>.<field> dynamic property to resolve a primary key column from somewhere else in the \
+                record instead.
+
+                "Batch size" controls how many records are grouped into a single batch statement. It is a throughput \
+                and heap trade-off, not a correctness one - a FlowFile larger than the batch size is written across \
+                several batches.
+                """)
+@UseCase(
+        description = "Update existing rows in a Cassandra or ScyllaDB table from the records in a FlowFile.",
+        keywords = {"cassandra", "scylladb", "cql", "update", "record"},
+        notes = "Cassandra and ScyllaDB do not distinguish an update from an insert: an UPDATE against a primary key "
+                + "that does not exist creates the row. Statement Type UPDATE differs from INSERT in that it writes "
+                + "only the columns present in the record, rather than replacing the whole row.",
+        configuration = """
+                Set "Statement Type" to UPDATE and list the primary key columns in "Update Keys" as a comma-separated \
+                list. Both are required together - an UPDATE with no update keys fails the FlowFile at runtime rather \
+                than failing validation, because the statement type may itself come from a FlowFile attribute.
+
+                Leave "Update Method" at SET to assign the record's values to the columns.
+
+                "Time To Live" and "Timestamp Field" both apply to SET-method updates. Setting "Timestamp Field" to a \
+                record field holding a stable timestamp makes reprocessing the same record a true no-op rather than a \
+                write that races whatever else has touched the row since.
+                """)
+@UseCase(
+        description = "Increment or decrement counter columns in a Cassandra or ScyllaDB counter table.",
+        keywords = {"cassandra", "scylladb", "cql", "counter", "increment", "decrement"},
+        notes = "Counter mutations are the one CQL write that is not idempotent: applying the same increment twice "
+                + "counts twice. Leave Run Duration at 0 for counter flows, since a longer Run Duration allows the "
+                + "framework to batch session commits, and a rolled-back batch is reprocessed from the queue. For the "
+                + "same reason, prefer counter flows that can tolerate at-least-once delivery.",
+        configuration = """
+                Set "Statement Type" to UPDATE, list the counter table's primary key columns in "Update Keys", and set \
+                "Update Method" to Increment or Decrement. Each record field matching a counter column supplies the \
+                amount to add or subtract.
+
+                Set "Batch Statement Type" to COUNTER, which is the type Cassandra and ScyllaDB require for counter \
+                mutations. UNLOGGED is also accepted; LOGGED is rejected.
+
+                Statement Type INSERT cannot be used against a counter table and is rejected.
+
+                "Time To Live" and "Timestamp Field" are ignored here - neither is supported on counter columns.
+                """)
 public class PutCQLRecord extends AbstractCQLProcessor {
     static final String STATEMENT_TYPE_ATTRIBUTE = "cql.statement.type";
 
@@ -178,7 +250,7 @@ public class PutCQLRecord extends AbstractCQLProcessor {
             .name("Batch Statement Type")
             .description("Specifies the type of 'Batch Statement' to be used.")
             .allowableValues(BatchStatementType.class)
-            .defaultValue(LOGGED_TYPE.getValue())
+            .defaultValue(UNLOGGED_TYPE.getValue())
             .required(false)
             .build();
 
@@ -214,9 +286,9 @@ public class PutCQLRecord extends AbstractCQLProcessor {
             new HashSet<>(Arrays.asList(REL_SUCCESS, REL_FAILURE, REL_RETRY)));
 
     private static final Pattern QUALIFIED_TABLE_PATTERN = Pattern.compile(
-            "^(?<keyspace>[a-zA-Z][a-zA-Z0-9_]*)\\.(?<table>[a-zA-Z][a-zA-Z0-9_]*)\\.(?<field>[a-zA-Z][a-zA-Z0-9_]*)$");
+            "^(?<keyspace>[a-zA-Z][a-zA-Z0-9_]{0,47})\\.(?<table>[a-zA-Z][a-zA-Z0-9_]{0,47})\\.(?<field>[a-zA-Z][a-zA-Z0-9_]{0,47})$");
     private static final Pattern TABLE_REGEX = Pattern.compile(
-            "^(?:(?<keyspace>[a-zA-Z][a-zA-Z0-9_]{1,48})\\.)?(?<table>[a-zA-Z][a-zA-Z0-9_]{1,48})$");
+            "^(?:(?<keyspace>[a-zA-Z][a-zA-Z0-9_]{0,47})\\.)?(?<table>[a-zA-Z][a-zA-Z0-9_]{0,47})$");
 
     private RecordPathCache recordPathCache;
 
@@ -337,12 +409,18 @@ public class PutCQLRecord extends AbstractCQLProcessor {
         // Get the batch statement type from the attribute if necessary
         final String batchStatementTypeProperty = context.getProperty(BATCH_STATEMENT_TYPE).getValue();
         String batchStatementType = batchStatementTypeProperty;
+
         if (BATCH_STATEMENT_TYPE_USE_ATTR_TYPE.getValue().equals(batchStatementTypeProperty)) {
             final String batchStatementTypeAttr = inputFlowFile.getAttribute(BATCH_STATEMENT_TYPE_ATTRIBUTE);
+
+            if (StringUtils.isBlank(batchStatementTypeAttr)) {
+                getLogger().error("Batch Statement Type is not specified, FlowFile {}", inputFlowFile);
+                session.penalize(inputFlowFile);
+                session.transfer(inputFlowFile, REL_FAILURE);
+                return;
+            }
+
             batchStatementType = StringUtils.isBlank(batchStatementTypeAttr) ? null : batchStatementTypeAttr.toUpperCase();
-        }
-        if (StringUtils.isEmpty(batchStatementType)) {
-            throw new IllegalArgumentException(format("Batch Statement Type is not specified, FlowFile %s", inputFlowFile));
         }
 
         final PropertyValue ttlProperty = context.getProperty(TTL).evaluateAttributeExpressions(inputFlowFile);

@@ -37,10 +37,10 @@ etc.) for a consistent configuration experience, but are otherwise unrelated imp
 * **Username** / **Password** - credentials for the cluster, only applied if both are set to a non-blank
   value.
 * **SSL Context Service** - an `SSLContextService` providing client certificate/trust material for a TLS
-  connection. Optional; if unset, the connection is unencrypted.
-* **Client Auth** - present as a supported property (inherited from the shared `CQLExecutionService`
-  connection-property set), but its value is not currently read anywhere in this service's connection-building
-  logic.
+  connection. Optional; if unset, the connection is unencrypted. Mutual TLS - a cluster configured with
+  `require_client_auth: true` - needs no separate setting here: it is enabled purely by referencing a service
+  that has a keystore configured, whose certificate is what this service presents when the cluster asks for
+  one.
 * **Fetch size** - default page size for query result sets; `0` means no limit. Can be overridden per query
   via `ExecuteCQLQueryRecord`'s own _Fetch Size_ property.
 * **Read Timout** / **Connect Timeout** - driver-level request and connection timeouts. _Read Timout_ can be

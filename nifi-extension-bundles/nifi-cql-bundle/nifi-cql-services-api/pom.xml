@@ -32,25 +32,14 @@
         </dependency>
 
         <!--
-        As of 4.17.0, this does not have any additional dependencies on the DataStax driver, meaning it should
-        in principle be usable with ScyllaDB's drivers
+        This module deliberately declares no database client dependency. It is the backend-agnostic contract
+        that the processors and every other non-database module compile against, so anything on its compile
+        classpath leaks transitively to all of them. The maven-enforcer rule below keeps it that way.
         -->
-        <dependency>
-            <groupId>org.apache.cassandra</groupId>
-            <artifactId>java-driver-query-builder</artifactId>
-            <version>4.19.3</version>
-        </dependency>
 
         <dependency>
             <groupId>org.apache.nifi</groupId>
             <artifactId>nifi-record</artifactId>
-        </dependency>
-
-        <dependency>
-            <groupId>org.apache.cassandra</groupId>
-            <artifactId>java-driver-core</artifactId>
-            <version>4.19.3</version>
-            <scope>provided</scope>
         </dependency>
 
         <dependency>
@@ -64,4 +53,45 @@
             <version>2.12.0-SNAPSHOT</version>
         </dependency>
     </dependencies>
+
+    <build>
+        <plugins>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-enforcer-plugin</artifactId>
+                <executions>
+                    <execution>
+                        <id>ban-database-client-dependencies</id>
+                        <goals>
+                            <goal>enforce</goal>
+                        </goals>
+                        <configuration>
+                            <rules>
+                                <bannedDependencies>
+                                    <message>
+                                        This module is the backend-agnostic contract that the processors and every other
+                                        non-database module compile against, so anything on its classpath leaks
+                                        transitively to all of them. It must not depend on any database client
+                                        library. Consistency-level names are declared locally in
+                                        CqlConsistencyLevel rather than derived from a driver enum for exactly
+                                        this reason. If you need a driver type here, the abstraction is wrong.
+                                    </message>
+                                    <searchTransitive>true</searchTransitive>
+                                    <excludes>
+                                        <!-- DataStax Java Driver 4.x, as published under both coordinates -->
+                                        <exclude>org.apache.cassandra:java-driver-*</exclude>
+                                        <exclude>com.datastax.oss:*</exclude>
+                                        <!-- DataStax Java Driver 3.x, which Testcontainers' Cassandra module drags in -->
+                                        <exclude>com.datastax.cassandra:*</exclude>
+                                        <!-- ScyllaDB's shard-aware fork of the same driver -->
+                                        <exclude>com.scylladb:*</exclude>
+                                    </excludes>
+                                </bannedDependencies>
+                            </rules>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+        </plugins>
+    </build>
 </project>

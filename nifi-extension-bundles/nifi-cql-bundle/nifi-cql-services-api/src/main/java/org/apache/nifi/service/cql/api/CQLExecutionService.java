@@ -16,9 +16,6 @@
  */
 package org.apache.nifi.service.cql.api;
 
-import com.datastax.oss.driver.api.core.ConsistencyLevel;
-import com.datastax.oss.driver.api.core.DefaultConsistencyLevel;
-import io.netty.handler.ssl.ClientAuth;
 import org.apache.nifi.components.PropertyDescriptor;
 import org.apache.nifi.components.resource.ResourceCardinality;
 import org.apache.nifi.components.resource.ResourceType;
@@ -34,8 +31,6 @@ import org.apache.nifi.ssl.SSLContextService;
 
 import java.util.List;
 import java.util.Map;
-import java.util.stream.Collectors;
-import java.util.stream.Stream;
 
 /**
  * Connection abstraction for Apache Cassandra/ScyllaDB, consumed by {@code PutCQLRecord} and
@@ -83,16 +78,6 @@ public interface CQLExecutionService extends ControllerService {
             .identifiesControllerService(SSLContextService.class)
             .build();
 
-    PropertyDescriptor CLIENT_AUTH = new PropertyDescriptor.Builder()
-            .name("Client Auth")
-            .description("Client authentication policy when connecting to secure (TLS/SSL) cluster. "
-                    + "Possible values are REQUIRED, WANT, NONE. This property is only used when an SSL Context "
-                    + "has been defined and enabled.")
-            .required(false)
-            .allowableValues(ClientAuth.values())
-            .defaultValue("REQUIRE")
-            .build();
-
     PropertyDescriptor USERNAME = new PropertyDescriptor.Builder()
             .name("Username")
             .description("Username to access the Cassandra cluster")
@@ -114,8 +99,8 @@ public interface CQLExecutionService extends ControllerService {
             .name("Consistency Level")
             .description("The strategy for how many replicas must respond before results are returned.")
             .required(true)
-            .allowableValues(Stream.of(DefaultConsistencyLevel.values()).map(ConsistencyLevel::name).collect(Collectors.toSet()))
-            .defaultValue(ConsistencyLevel.ONE.name())
+            .allowableValues(CqlConsistencyLevel.class)
+            .defaultValue(CqlConsistencyLevel.ONE.getValue())
             .build();
 
     PropertyDescriptor FETCH_SIZE = new PropertyDescriptor.Builder()
@@ -196,17 +181,22 @@ public interface CQLExecutionService extends ControllerService {
      * {@code callback.receive(...)} rather than materializing the whole result set, so arbitrarily large
      * result sets are supported.
      *
+     * <p>Values for {@code cql}'s {@code ?} bind markers are supplied via {@code parameters} rather than
+     * being concatenated into the statement text, so a value originating outside the flow's configuration -
+     * a FlowFile attribute, say - is sent to the server as data and can never be parsed as CQL. Prefer this
+     * over interpolating such a value into {@code cql} itself.
+     *
      * @param cql the CQL statement text, with {@code ?} bind markers for any positional {@code parameters}
-     * @param cacheStatement accepted for a future prepared-statement caching strategy; not currently read by
-     * any implementation in this codebase
      * @param parameters positional values bound to {@code cql}'s bind markers, in order; may be {@code null}
-     * or empty for a statement with no parameters
+     * or empty for a statement with no parameters. Implementations are expected to convert each value to the
+     * Java type its bind marker's declared CQL type requires, so a value supplied as text still binds to a
+     * non-text column
      * @param callback invoked once per result row, and finally with {@code isExhausted = true} on the last row
      * @param overrides per-call fetch size/timeout overrides; use {@link QueryOverrides#NONE} for none
      * @throws QueryFailureException if the query failed at the driver/server level (as opposed to, for
      * example, malformed input, which implementations may instead surface as an unchecked exception)
      */
-    void query(String cql, boolean cacheStatement, List parameters, CQLQueryCallback callback, QueryOverrides overrides) throws QueryFailureException;
+    void query(String cql, List<Object> parameters, CQLQueryCallback callback, QueryOverrides overrides) throws QueryFailureException;
 
     /**
      * Writes a single record to {@code table} via {@code INSERT}. Each record field is written to the column

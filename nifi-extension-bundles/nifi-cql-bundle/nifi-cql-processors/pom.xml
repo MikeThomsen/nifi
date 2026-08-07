@@ -54,12 +54,6 @@
         </dependency>
         <dependency>
             <groupId>org.apache.nifi</groupId>
-            <artifactId>nifi-cassandra-session-provider-service</artifactId>
-            <version>2.12.0-SNAPSHOT</version>
-            <scope>test</scope>
-        </dependency>
-        <dependency>
-            <groupId>org.apache.nifi</groupId>
             <artifactId>nifi-record-serialization-service-api</artifactId>
             <scope>compile</scope>
         </dependency>
@@ -83,22 +77,50 @@
         </dependency>
 
         <dependency>
-            <groupId>org.testcontainers</groupId>
-            <artifactId>testcontainers-cassandra</artifactId>
-            <version>${testcontainers.version}</version>
-            <scope>test</scope>
-        </dependency>
-        <dependency>
-            <groupId>org.testcontainers</groupId>
-            <artifactId>testcontainers-junit-jupiter</artifactId>
-            <version>${testcontainers.version}</version>
-            <scope>test</scope>
-        </dependency>
-        <dependency>
             <groupId>org.apache.nifi</groupId>
             <artifactId>nifi-record-path</artifactId>
             <version>2.12.0-SNAPSHOT</version>
             <scope>compile</scope>
         </dependency>
     </dependencies>
+
+    <build>
+        <plugins>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-enforcer-plugin</artifactId>
+                <executions>
+                    <execution>
+                        <id>ban-database-client-dependencies</id>
+                        <goals>
+                            <goal>enforce</goal>
+                        </goals>
+                        <configuration>
+                            <rules>
+                                <bannedDependencies>
+                                    <message>
+                                        The processors talk to a database only through the CQLExecutionService
+                                        abstraction, never through a driver directly, so no database client
+                                        library belongs on this module's classpath at any scope. If an
+                                        integration test here genuinely needs a live driver, add it to a module
+                                        that owns a backend instead.
+                                    </message>
+                                    <searchTransitive>true</searchTransitive>
+                                    <excludes>
+                                        <!-- DataStax Java Driver 4.x, as published under both coordinates -->
+                                        <exclude>org.apache.cassandra:java-driver-*</exclude>
+                                        <exclude>com.datastax.oss:*</exclude>
+                                        <!-- DataStax Java Driver 3.x, which Testcontainers' Cassandra module drags in -->
+                                        <exclude>com.datastax.cassandra:*</exclude>
+                                        <!-- ScyllaDB's shard-aware fork of the same driver -->
+                                        <exclude>com.scylladb:*</exclude>
+                                    </excludes>
+                                </bannedDependencies>
+                            </rules>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+        </plugins>
+    </build>
 </project>

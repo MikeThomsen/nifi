@@ -50,6 +50,17 @@
             <version>${driver.version}</version>
         </dependency>
 
+        <!--
+        Declared explicitly rather than inherited: this module's statement generation uses the query builder
+        directly. It previously resolved transitively through nifi-cql-services-api, which is exactly the
+        leak that put the driver on the backend-agnostic modules' classpath.
+        -->
+        <dependency>
+            <groupId>org.apache.cassandra</groupId>
+            <artifactId>java-driver-query-builder</artifactId>
+            <version>${driver.version}</version>
+        </dependency>
+
         <dependency>
             <groupId>org.apache.nifi</groupId>
             <artifactId>nifi-ssl-context-service-api</artifactId>

@@ -31,4 +31,12 @@ public interface CQLQueryCallback {
      * @param isExhausted {@code true} if this is the last row in the result set
      */
     void receive(long rowNumber, Record result, boolean isExhausted);
+
+    /**
+     * This method will be called when a session provider service needs to be able to signal that a fatal error
+     * happened and any batched data needs to be cleaned up so the session can be committed properly
+     */
+    void clear();
+
+    boolean hasSentOriginal();
 }

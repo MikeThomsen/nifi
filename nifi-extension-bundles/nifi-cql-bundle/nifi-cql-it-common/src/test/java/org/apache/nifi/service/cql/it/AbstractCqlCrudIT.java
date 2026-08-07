@@ -25,7 +25,6 @@ import org.apache.nifi.serialization.record.RecordField;
 import org.apache.nifi.serialization.record.RecordFieldType;
 import org.apache.nifi.serialization.record.RecordSchema;
 import org.apache.nifi.service.cql.api.CQLExecutionService;
-import org.apache.nifi.service.cql.api.CQLQueryCallback;
 import org.apache.nifi.service.cql.api.CqlBatchType;
 import org.apache.nifi.service.cql.api.QueryOverrides;
 import org.apache.nifi.service.cql.api.UpdateMethod;
@@ -433,10 +432,12 @@ public abstract class AbstractCqlCrudIT {
             session.execute(statement);
         }
 
-        List<org.apache.nifi.serialization.record.Record> records = new ArrayList<>();
-        CQLQueryCallback callback = (rowNumber, result, isExhausted) -> records.add(result);
+        CollectingCqlQueryCallback callback = new CollectingCqlQueryCallback();
 
-        sessionProvider.query("select * from testspace.query_test", false, null, callback, QueryOverrides.NONE);
+        sessionProvider.query("select * from testspace.query_test", null, callback, QueryOverrides.NONE);
+
+        assertTrue(callback.getRecords().size() >= statements.length,
+                () -> "Expected at least the " + statements.length + " inserted rows back, got " + callback.getRecords().size());
     }
 
     @Test
@@ -455,10 +456,12 @@ public abstract class AbstractCqlCrudIT {
         runner.setProperty(unsatisfiableConsistencyProvider, CQLExecutionService.CONSISTENCY_LEVEL, "THREE");
         runner.enableControllerService(unsatisfiableConsistencyProvider);
 
-        final CQLQueryCallback callback = (rowNumber, result, isExhausted) -> { };
+        final CollectingCqlQueryCallback callback = new CollectingCqlQueryCallback();
 
         assertThrows(QueryFailureException.class, () -> unsatisfiableConsistencyProvider.query(
-                "select * from testspace.query_test", false, null, callback, QueryOverrides.NONE));
+                "select * from testspace.query_test", null, callback, QueryOverrides.NONE));
+
+        assertTrue(callback.getRecords().isEmpty(), "A query that never executed should not have delivered rows");
     }
 
     @Test

@@ -58,6 +58,27 @@
             <version>4.19.2.0</version>
         </dependency>
 
+        <!--
+        Declared explicitly rather than inherited: the shade plugin below folds the Cassandra service's
+        classes into this artifact, and those classes use the query builder, so it has to be on this NAR's
+        runtime classpath in its own right. It previously arrived via nifi-cql-services-api-nar, which is
+        exactly the leak that put the driver on the backend-agnostic modules' classpath.
+
+        The DataStax core artifact is excluded because ScyllaDB's shard-aware fork below supplies the same
+        com.datastax.oss.driver.api.core packages; keeping both would put two copies on the classpath.
+        -->
+        <dependency>
+            <groupId>org.apache.cassandra</groupId>
+            <artifactId>java-driver-query-builder</artifactId>
+            <version>4.19.3</version>
+            <exclusions>
+                <exclusion>
+                    <groupId>org.apache.cassandra</groupId>
+                    <artifactId>java-driver-core</artifactId>
+                </exclusion>
+            </exclusions>
+        </dependency>
+
         <dependency>
             <groupId>org.apache.nifi</groupId>
             <artifactId>nifi-ssl-context-service-api</artifactId>

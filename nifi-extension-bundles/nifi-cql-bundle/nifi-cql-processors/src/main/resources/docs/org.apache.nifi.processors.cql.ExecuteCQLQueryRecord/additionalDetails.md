@@ -39,44 +39,106 @@ The `executecql.row.count` attribute on the routed FlowFile(s) is not written di
 row-count reporting comes from the fragmentation attributes described below, which is the accurate signal
 when a single query's results are split across more than one FlowFile.
 
+## Query parameters
+
+A query can carry `?` bind markers, each supplied by a dynamic property named `cql.arg.<position>`, where
+`<position>` is the marker's 1-based position in the query text:
+
+| Property | Value |
+|---|---|
+| _CQL select query_ | `SELECT * FROM sensors.readings WHERE sensor_id = ? AND taken_at > ?` |
+| `cql.arg.1` | `${sensor.id}` |
+| `cql.arg.2` | `${reading.since}` |
+
+Positions must run consecutively from 1 - a gap such as `cql.arg.1` plus `cql.arg.3` is a configuration error
+and fails validation, since the parameters are matched to markers by position. The number of parameters must
+also match the number of markers in the query; a mismatch fails the query with a message giving both counts.
+
+Each value is evaluated as Expression Language against the incoming FlowFile, then **bound** - sent to the
+cluster as a data value, separately from the statement text. Parameter values are therefore never parsed as
+CQL: a value of `1' OR '1'='1` is looked up as that literal string, not treated as query syntax.
+
+Because Expression Language always produces text, each parameter is converted to whatever Java type its bind
+marker's declared CQL type requires, using the same conversion applied to record values on the write path.
+Text works directly for `text`/`ascii` columns, for the boolean, numeric, `date` and `time` types, for `uuid`,
+for `timeuuid` (which must still be a genuine version-1 UUID), and for `timestamp`, which accepts either an
+ISO-8601 instant such as `2026-08-07T14:30:00Z` or a count of milliseconds since the epoch. A type outside
+that set - `blob`, `inet`, `decimal`, `varint` or a collection - is passed to the driver as-is and will fail
+the query unless the value is already of a type the driver's codec for that column accepts.
+
+### Interpolating a value into the query text instead
+
+The _CQL select query_ property also supports Expression Language, so a FlowFile attribute can be interpolated
+directly into the query text. That is a deliberate capability - it is the only way to vary the parts of a
+statement that cannot be parameterized, such as a table name or a column list - but it is **not** a substitute
+for parameters, and it carries a real risk:
+
+> Anything interpolated into the query text is parsed as CQL. An attribute whose value is influenced by
+> upstream data - the contents of a file, a value from an external system, an HTTP request - can therefore
+> alter the structure of the statement, not just a value within it. This is CQL injection, and it is the same
+> exposure that string-concatenated SQL has.
+
+Use `?` markers with `cql.arg.<position>` properties for every value that comes from outside the flow's own
+configuration. Reserve interpolation into the query text for values you control - and where an identifier
+genuinely must be dynamic, constrain the attribute upstream to a known set rather than passing it through
+unchecked.
+
 ## Data types
 
 Result set values are converted to an Avro schema (and from there, whatever the configured Record Writer
-produces) using the same type mapping `PutCQLRecord` uses for writes, in reverse:
+produces) using the same type mapping `PutCQLRecord` uses for writes, in reverse. The value placed into each
+record field is whatever the DataStax driver's own codec decoded the column into, unchanged.
 
 * `BOOLEAN` &rarr; boolean; `TINYINT`/`SMALLINT`/`INT` &rarr; int (Avro has no byte/short primitive, so these
-  widen); `BIGINT`/`COUNTER` &rarr; long; `FLOAT` &rarr; float; `DOUBLE` &rarr; double; `BLOB` &rarr; bytes.
-* `ASCII`/`TEXT`, `TIMESTAMP`, `UUID`, `TIMEUUID`, `INET`, `VARINT`, `DATE`, `TIME`, and `DECIMAL` are all
-  represented as a string field - see [Reading a timeuuid or uuid column](#reading-a-timeuuid-or-uuid-column)
-  below for a caveat specific to `UUID`/`TIMEUUID`.
+  widen); `BIGINT`/`COUNTER` &rarr; long; `FLOAT` &rarr; float; `DOUBLE` &rarr; double; `BLOB` &rarr; bytes;
+  `ASCII`/`TEXT` &rarr; string.
+* `UUID` and `TIMEUUID` become the record API's native `UUID` field type, holding the `java.util.UUID` the
+  driver decoded. A `timeuuid` column's value is always a genuine version-1 (time-based) UUID by the time
+  it's read back - Cassandra/ScyllaDB do not accept a non-version-1 value being written to a `timeuuid`
+  column in the first place (see `PutCQLRecord`'s documentation for what happens on that write-side
+  rejection) - so there is nothing extra to validate on the read side.
+* `TIMESTAMP`, `DATE`, `TIME`, `DECIMAL`, `VARINT` and `INET` are declared as a string field, while the value
+  itself stays the driver's decoded object - a `java.time.Instant`, `LocalDate`, `LocalTime`,
+  `java.math.BigDecimal`, `java.math.BigInteger` or `java.net.InetAddress` respectively. See
+  [String-declared fields and their values](#string-declared-fields-and-their-values) below, which explains
+  why and what it means for a downstream consumer.
 * `LIST`/`SET` become an Avro array, `MAP` becomes an Avro map, and a Cassandra User Defined Type (UDT)
-  becomes a nested named Avro record, all recursively - a UDT nested inside another UDT, or inside a
-  `LIST`/`SET`/`MAP`, is resolved the same way with no special-casing. Note that Avro maps require string
-  keys: a CQL `map` whose key type isn't already string-like is represented with its real (non-string) key
-  objects in the underlying data even though the declared schema implies string keys - see the caveat below,
-  which applies to this the same way it applies to `UUID`/`TIMEUUID`.
-* A CQL type with no mapping defined (for example `DURATION`) fails the query rather than silently dropping
-  or mis-typing the column.
+  becomes a nested named Avro record, all recursively, using the same per-element type mapping described
+  above - a UDT nested inside another UDT, or inside a `LIST`/`SET`/`MAP`, is resolved the same way with no
+  special-casing. Note that Avro maps require string keys: a CQL `map` whose key type isn't already
+  string-like is represented with its real (non-string) key objects in the underlying data even though the
+  declared schema implies string keys.
+* A CQL type with no mapping defined above - `DURATION`, `TUPLE`, `VECTOR`, or any future/custom type - is
+  represented as a string field holding the driver's own decoded object. This keeps one unusual column from
+  failing the entire query; it does not attempt to give the column's structure (a tuple's individual
+  elements, a vector's components) back as anything richer.
 
-### Reading a timeuuid or uuid column
+### String-declared fields and their values
 
-`UUID` and `TIMEUUID` columns are both declared as a string field in the generated schema, but the actual
-value placed into the resulting Record is the raw `java.util.UUID` object the driver decoded, not an
-already-stringified value - the two are only reconciled if and when something downstream calls
-`getAsString(...)` (or another API that coerces through the field's declared type), which converts it via
-`UUID.toString()` - a complete, lossless, canonical rendering of all 128 bits, so the *value* itself is never
-corrupted or truncated by this. In practice this is transparent for typical usage, since RecordSetWriters
-generally coerce a non-`String` object into the declared `String` field rather than requiring an exact type
-match. It's worth knowing about mainly because it means the schema's declared type (`string`) and the
-record's actual in-memory value type (`UUID`) don't literally agree until something forces the coercion -
-not a correctness problem in ordinary use, but relevant if you're writing custom downstream logic against
-the record data directly (for example a script or a custom writer) that does a strict type check rather than
-going through the Record API's own accessors.
+For the types listed above as string-declared, the field's declared type (`string`) and the value's runtime
+class (`Instant`, `BigDecimal`, ...) are deliberately not the same class. This is a supported combination
+rather than a defect: NiFi's `STRING` is a **widening** record type over `DATE`, `TIME`, `TIMESTAMP`,
+`DECIMAL`, `BIGINT` and others, so `DataTypeUtils` accepts each of these values for a string field and
+coerces it **losslessly** — via `toString()` — if and when a Record Writer asks for a string. A nanosecond
+`LocalTime` renders in full as `15:14:54.899676065`; a `BigDecimal` renders as its exact decimal text.
 
-A `timeuuid` column's value is always a genuine version-1 (time-based) UUID by the time it's read back -
-Cassandra/ScyllaDB do not accept a non-version-1 value being written to a `timeuuid` column in the first
-place (see `PutCQLRecord`'s documentation for what happens on that write-side rejection), so there is nothing
-extra to validate on the read side.
+Leaving the driver's object in place is what makes both readings available: a writer that wants text gets a
+faithful rendering, and a script or custom writer that wants the real `BigDecimal`, `Instant` or
+`InetAddress` can take it straight from `getValue(...)` without reparsing a string.
+
+Declaring NiFi's native types instead is not workable for these columns:
+
+* NiFi's native `TIMESTAMP`/`DATE`/`TIME` types are backed by `java.sql.Timestamp`/`Date`/`Time`, not
+  `java.time.*`. Pairing them with the driver's values makes conversion **fail outright** for `TIMESTAMP`,
+  and converting the values to `java.sql.*` to suit instead **truncates** — CQL `time` is
+  nanosecond-resolution and `java.sql.Time` is not, so `15:14:54.899676065` would become `15:14:54`.
+* A native `DECIMAL` field needs a fixed precision and scale declared up front, which CQL's
+  arbitrary-precision `decimal` cannot supply; a native `BIGINT` is not reachable through the Avro schema
+  round trip at all.
+* There is no native NiFi record type for an IP address.
+
+One consequence worth knowing: `InetAddress.toString()` renders as `/127.0.0.1`, with a leading slash, so an
+`inet` column coerced to text carries that slash. Use the `InetAddress` object directly if that matters.
 
 ## Pagination and query overrides
 

@@ -66,12 +66,27 @@ to use it) selects between two CQL statement shapes:
 ## Batching
 
 _Batch size_ controls how many records are grouped into a single `BatchStatement` (default 100). _Batch
-Statement Type_ selects `LOGGED` (atomic, the default), `UNLOGGED` (higher throughput, no atomicity
-guarantee), or `COUNTER` (required for counter mutations); it can also be resolved per FlowFile from the
-`cql.batch.statement.type` attribute. If a batch fails partway through a FlowFile with multiple batches, the
-FlowFile is routed to `retry` (on a query failure) or `failure` (on any other error) with the
+Statement Type_ selects `UNLOGGED` (the default - higher throughput, no atomicity guarantee), `LOGGED`
+(atomic across partitions, at the cost of writing every batch to the distributed batchlog first, so reserve
+it for the cases that genuinely need that atomicity), or `COUNTER` (required for counter mutations); it can
+also be resolved per FlowFile from the `cql.batch.statement.type` attribute. If a batch fails partway
+through a FlowFile with multiple batches, the FlowFile is routed to `retry` (on a query failure) or
+`failure` (on any other error) with the
 `cql.records.written` attribute set to how many records were already committed in prior batches within that
 attempt, since earlier batches may have succeeded even though the FlowFile as a whole did not.
+
+### Run Duration and counters
+
+This processor supports batching in the framework sense as well, so _Run Duration_ can be raised above `0` to
+let NiFi batch session commits and trade latency for throughput. That is safe for `INSERT` and `SET`-method
+`UPDATE` because a CQL write against a full primary key is an upsert: if a batch is rolled back and the
+FlowFiles are reprocessed, the same rows are written again to the same values. Setting _Timestamp Field_ makes
+that guarantee exact rather than merely usually-true.
+
+**It is not safe for counters.** `INCREMENT` and `DECREMENT` are the one CQL write that is not idempotent -
+reprocessing a FlowFile applies its increments a second time. Leave _Run Duration_ at `0` on any flow using a
+counter _Update Method_, and prefer counter flows that can tolerate at-least-once delivery in any case, since
+a rollback can also be triggered by a failure that has nothing to do with Run Duration.
 
 ## TTL and write timestamp overrides
 

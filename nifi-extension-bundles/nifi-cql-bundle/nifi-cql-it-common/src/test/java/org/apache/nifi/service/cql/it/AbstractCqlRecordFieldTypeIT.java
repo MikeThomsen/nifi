@@ -22,6 +22,7 @@ import com.datastax.oss.driver.api.core.data.UdtValue;
 import com.datastax.oss.driver.api.core.uuid.Uuids;
 import org.apache.nifi.serialization.SimpleRecordSchema;
 import org.apache.nifi.serialization.record.MapRecord;
+import org.apache.nifi.serialization.record.DataType;
 import org.apache.nifi.serialization.record.RecordField;
 import org.apache.nifi.serialization.record.RecordFieldType;
 import org.apache.nifi.serialization.record.RecordSchema;
@@ -34,6 +35,9 @@ import org.apache.nifi.util.TestRunner;
 import org.apache.nifi.util.TestRunners;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.provider.MethodSource;
+import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.api.TestInstance;
 
 import java.math.BigDecimal;
@@ -44,14 +48,15 @@ import java.time.Instant;
 import java.time.LocalDate;
 import java.time.LocalTime;
 import java.time.temporal.ChronoUnit;
-import java.util.ArrayList;
 import java.util.List;
+import java.util.stream.Stream;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.params.provider.Arguments.arguments;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -61,17 +66,24 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * and {@link CQLExecutionService#query(String, boolean, List, CQLQueryCallback, QueryOverrides)} once per
  * {@link RecordFieldType},
  * excluding CHOICE, which has no natural CQL column type since it represents a union of possible types rather
- * than a single one, against whichever backend the concrete subclass wires up. Every test follows the same
+ * than a single one, against whichever backend the concrete subclass wires up. Every case follows the same
  * shape: write a record, assert the write succeeds, read the row back, and assert the value comes back
- * correctly. Each test creates a dedicated table whose one non-key column is a CQL type that naturally fits
+ * correctly. Each creates a dedicated table whose one non-key column is a CQL type that naturally fits
  * the RecordFieldType under test, or - for RECORD and MAP, whose natural fit needs more than a single column
  * type - a User Defined Type.
  *
+ * <p>Most of that matrix is the {@code singleColumnTypes} table driving {@link #testSingleColumnType}, one row
+ * per pairing, so the coverage can be read as a grid rather than reconstructed by scrolling through two dozen
+ * near-identical methods. Types whose handling needs more than a value and a comparison - collections, UDTs,
+ * and the cases asserting a rejection - keep their own methods, since the row shape would obscure what they
+ * actually check.
+ *
  * <p>{@code CassandraCQLExecutionService} (the base implementation both Cassandra's and ScyllaDB's session
  * providers share) binds {@code Record.getValue(fieldName)} directly to the prepared statement without any
- * type coercion beyond what {@code convertForCqlType} normalizes, so several tests here deliberately use a
+ * type coercion beyond what {@code convertForCqlType} normalizes, so several cases here deliberately use a
  * non-canonical input value (a {@code String}, a mismatched {@code Number}, etc.) to prove that normalization
- * actually happens, then confirm the stored value is correct by reading it back.
+ * actually happens, then confirm the stored value is correct by reading it back. Those are the rows whose
+ * {@code written} and {@code expected} columns differ.
  * <p>
  * Setup is a plain protected method rather than a JUnit lifecycle callback for the same reason documented on
  * {@link AbstractCqlCrudIT}.
@@ -139,209 +151,97 @@ public abstract class AbstractCqlRecordFieldTypeIT {
      * throw and that exactly one row came back, then returns it for the caller to assert on.
      */
     private org.apache.nifi.serialization.record.Record readBack(final String tableName, final String columns, final int id) {
-        final List<org.apache.nifi.serialization.record.Record> results = new ArrayList<>();
-        final CQLQueryCallback callback = (rowNumber, result, isExhausted) -> results.add(result);
+        final CollectingCqlQueryCallback callback = new CollectingCqlQueryCallback();
 
         assertDoesNotThrow(() -> sessionProvider.query(
-                String.format("select %s from %s.%s where id = %d", columns, keyspace, tableName, id), false, null, callback, QueryOverrides.NONE));
+                String.format("select %s from %s.%s where id = %d", columns, keyspace, tableName, id), null, callback, QueryOverrides.NONE));
 
+        final List<org.apache.nifi.serialization.record.Record> results = callback.getRecords();
         assertEquals(1, results.size(), () -> "Expected exactly one row back from " + tableName);
         return results.getFirst();
     }
 
-    @Test
-    @DisplayName("A record with a BOOLEAN field writes to and reads back from a boolean column")
-    void testBoolean() {
-        createTable("boolean_test", "boolean");
-        final RecordSchema schema = schemaFor(new RecordField("value_field", RecordFieldType.BOOLEAN.getDataType()));
-        final MapRecord record = new MapRecord(schema, Map.of("id", 1, "value_field", Boolean.TRUE));
+    /**
+     * The single-column type matrix: one row per (record field type, CQL column type) pairing, each writing a
+     * value and reading it back.
+     *
+     * <p>{@code written} and {@code expected} differ for the rows that exist to prove coercion happens - a
+     * value handed to the service in one Java type must come back in the type the column actually holds. Where
+     * they are the same object the row is a plain round-trip.
+     *
+     * <p>Types whose handling needs more than a value and a comparison - collections, UDTs, and the
+     * timeuuid rejection - keep their own methods below; forcing them into this shape would hide what they
+     * assert.
+     */
+    static Stream<Arguments> singleColumnTypes() {
+        final Instant timestamp = Instant.now().truncatedTo(ChronoUnit.MILLIS);
+        final UUID uuid = UUID.randomUUID();
+        final UUID timeUuid = Uuids.timeBased();
+        final Date sqlDate = Date.valueOf(LocalDate.of(2024, 3, 15));
+        final Time sqlTime = Time.valueOf(LocalTime.of(13, 45, 30));
+        final BigDecimal decimal = new BigDecimal("123.456");
+        final Map<String, String> map = Map.of("key1", "value1", "key2", "value2");
+        // Bound once and reused for both the written and the expected value: calling now() twice would compare
+        // two different instants, which is a round-trip failure that has nothing to do with the round trip.
+        final LocalDate today = LocalDate.now();
+        final LocalTime timeOfDay = LocalTime.now();
 
-        assertDoesNotThrow(() -> sessionProvider.insert(new QualifiedTableName(null, "boolean_test"), record, Map.of(), WriteOverrides.NONE));
+        return Stream.of(
+                arguments("BOOLEAN -> boolean", "boolean_test", "boolean", RecordFieldType.BOOLEAN.getDataType(), Boolean.TRUE, Boolean.TRUE),
+                arguments("BYTE -> tinyint", "byte_test", "tinyint", RecordFieldType.BYTE.getDataType(), (byte) 42, (byte) 42),
+                arguments("SHORT -> smallint", "short_test", "smallint", RecordFieldType.SHORT.getDataType(), (short) 1234, (short) 1234),
+                arguments("INT -> int", "int_test", "int", RecordFieldType.INT.getDataType(), 123456, 123456),
+                arguments("LONG -> bigint", "long_test", "bigint", RecordFieldType.LONG.getDataType(), 123456789012345L, 123456789012345L),
+                arguments("BIGINT -> varint", "bigint_test", "varint", RecordFieldType.BIGINT.getDataType(), BigInteger.valueOf(123456789L), BigInteger.valueOf(123456789L)),
+                arguments("FLOAT -> float", "float_test", "float", RecordFieldType.FLOAT.getDataType(), 1.5f, 1.5f),
+                arguments("DOUBLE -> double", "double_test", "double", RecordFieldType.DOUBLE.getDataType(), 1.5d, 1.5d),
+                arguments("DECIMAL -> decimal", "decimal_test", "decimal", RecordFieldType.DECIMAL.getDataType(), decimal, decimal),
 
-        assertEquals(Boolean.TRUE, readBack("boolean_test", "value_field", 1).getValue("value_field"));
+                // DECIMAL is the only scalar-adjacent type (besides ENUM) with its own DataType subclass, so this
+                // row exercises DecimalDataType specifically. CQL's decimal has no fixed precision or scale of its
+                // own - it stores an arbitrary-precision unscaled value - so the precision/scale here is NiFi-side
+                // schema metadata that the value must simply conform to.
+                arguments("DECIMAL(10,2) -> decimal", "decimal_precision_scale_test", "decimal",
+                        RecordFieldType.DECIMAL.getDecimalDataType(10, 2), new BigDecimal("12345678.90"), new BigDecimal("12345678.90")),
+
+                // CQL timestamp has millisecond resolution, so the written value is truncated up front to make
+                // the round-trip comparison exact.
+                arguments("TIMESTAMP -> timestamp", "timestamp_test", "timestamp", RecordFieldType.TIMESTAMP.getDataType(), timestamp, timestamp),
+                arguments("DATE -> date", "date_test", "date", RecordFieldType.DATE.getDataType(), today, today),
+                arguments("TIME -> time", "time_test", "time", RecordFieldType.TIME.getDataType(), timeOfDay, timeOfDay),
+                arguments("UUID -> uuid", "uuid_test", "uuid", RecordFieldType.UUID.getDataType(), uuid, uuid),
+                arguments("UUID (v1) -> timeuuid", "timeuuid_test", "timeuuid", RecordFieldType.UUID.getDataType(), timeUuid, timeUuid),
+                arguments("CHAR -> text", "char_test", "text", RecordFieldType.CHAR.getDataType(), "A", "A"),
+                arguments("ENUM -> text", "enum_test", "text", RecordFieldType.ENUM.getDataType(), "VALUE_ONE", "VALUE_ONE"),
+                arguments("STRING -> text", "string_test", "text", RecordFieldType.STRING.getDataType(), "hello world", "hello world"),
+                arguments("MAP -> map<text, text>", "map_test", "map<text, text>",
+                        RecordFieldType.MAP.getMapDataType(RecordFieldType.STRING.getDataType()), map, map),
+
+                // Coercion rows: written in one Java type, expected back in the type the column holds. Reading
+                // back the coerced type - rather than the type handed in - is what proves the conversion ran.
+                arguments("BOOLEAN <- String", "boolean_coercion_test", "boolean", RecordFieldType.BOOLEAN.getDataType(), "true", Boolean.TRUE),
+                arguments("UUID <- String", "uuid_coercion_test", "uuid", RecordFieldType.UUID.getDataType(), uuid.toString(), uuid),
+                arguments("CHAR <- Character", "char_coercion_test", "text", RecordFieldType.CHAR.getDataType(), 'A', "A"),
+
+                // java.sql.Date/Time bind through JavaSQLDateCodec and JavaSQLTimeCodec, but reads go through the
+                // driver's default DATE/TIME codecs: registering those codecs adds a way to bind the java.sql
+                // type, it does not replace the driver's default for an untyped read like Row.getObject(int).
+                arguments("DATE <- java.sql.Date", "date_coercion_test", "date", RecordFieldType.DATE.getDataType(), sqlDate, sqlDate.toLocalDate()),
+                arguments("TIME <- java.sql.Time", "time_coercion_test", "time", RecordFieldType.TIME.getDataType(), sqlTime, sqlTime.toLocalTime()));
     }
 
-    @Test
-    @DisplayName("A record with a BYTE field writes to and reads back from a tinyint column")
-    void testByte() {
-        createTable("byte_test", "tinyint");
-        final RecordSchema schema = schemaFor(new RecordField("value_field", RecordFieldType.BYTE.getDataType()));
-        final MapRecord record = new MapRecord(schema, Map.of("id", 1, "value_field", (byte) 42));
+    @ParameterizedTest(name = "{0}")
+    @MethodSource("singleColumnTypes")
+    @DisplayName("A record field writes to its CQL column and reads back as the value the column holds")
+    void testSingleColumnType(final String description, final String tableName, final String cqlColumnType,
+                              final DataType dataType, final Object written, final Object expected) {
+        createTable(tableName, cqlColumnType);
+        final RecordSchema schema = schemaFor(new RecordField("value_field", dataType));
+        final MapRecord record = new MapRecord(schema, Map.of("id", 1, "value_field", written));
 
-        assertDoesNotThrow(() -> sessionProvider.insert(new QualifiedTableName(null, "byte_test"), record, Map.of(), WriteOverrides.NONE));
+        assertDoesNotThrow(() -> sessionProvider.insert(new QualifiedTableName(null, tableName), record, Map.of(), WriteOverrides.NONE));
 
-        assertEquals((byte) 42, readBack("byte_test", "value_field", 1).getValue("value_field"));
-    }
-
-    @Test
-    @DisplayName("A record with a SHORT field writes to and reads back from a smallint column")
-    void testShort() {
-        createTable("short_test", "smallint");
-        final RecordSchema schema = schemaFor(new RecordField("value_field", RecordFieldType.SHORT.getDataType()));
-        final MapRecord record = new MapRecord(schema, Map.of("id", 1, "value_field", (short) 1234));
-
-        assertDoesNotThrow(() -> sessionProvider.insert(new QualifiedTableName(null, "short_test"), record, Map.of(), WriteOverrides.NONE));
-
-        assertEquals((short) 1234, readBack("short_test", "value_field", 1).getValue("value_field"));
-    }
-
-    @Test
-    @DisplayName("A record with an INT field writes to and reads back from an int column")
-    void testInt() {
-        createTable("int_test", "int");
-        final RecordSchema schema = schemaFor(new RecordField("value_field", RecordFieldType.INT.getDataType()));
-        final MapRecord record = new MapRecord(schema, Map.of("id", 1, "value_field", 123456));
-
-        assertDoesNotThrow(() -> sessionProvider.insert(new QualifiedTableName(null, "int_test"), record, Map.of(), WriteOverrides.NONE));
-
-        assertEquals(123456, readBack("int_test", "value_field", 1).getValue("value_field"));
-    }
-
-    @Test
-    @DisplayName("A record with a LONG field writes to and reads back from a bigint column")
-    void testLong() {
-        createTable("long_test", "bigint");
-        final RecordSchema schema = schemaFor(new RecordField("value_field", RecordFieldType.LONG.getDataType()));
-        final MapRecord record = new MapRecord(schema, Map.of("id", 1, "value_field", 123456789012345L));
-
-        assertDoesNotThrow(() -> sessionProvider.insert(new QualifiedTableName(null, "long_test"), record, Map.of(), WriteOverrides.NONE));
-
-        assertEquals(123456789012345L, readBack("long_test", "value_field", 1).getValue("value_field"));
-    }
-
-    @Test
-    @DisplayName("A record with a BIGINT field writes to and reads back from a varint column")
-    void testBigint() {
-        createTable("bigint_test", "varint");
-        final RecordSchema schema = schemaFor(new RecordField("value_field", RecordFieldType.BIGINT.getDataType()));
-        final BigInteger expected = new BigInteger("123456789012345678901234567890");
-        final MapRecord record = new MapRecord(schema, Map.of("id", 1, "value_field", expected));
-
-        assertDoesNotThrow(() -> sessionProvider.insert(new QualifiedTableName(null, "bigint_test"), record, Map.of(), WriteOverrides.NONE));
-
-        assertEquals(expected, readBack("bigint_test", "value_field", 1).getValue("value_field"));
-    }
-
-    @Test
-    @DisplayName("A record with a FLOAT field writes to and reads back from a float column")
-    void testFloat() {
-        createTable("float_test", "float");
-        final RecordSchema schema = schemaFor(new RecordField("value_field", RecordFieldType.FLOAT.getDataType()));
-        final MapRecord record = new MapRecord(schema, Map.of("id", 1, "value_field", 3.14f));
-
-        assertDoesNotThrow(() -> sessionProvider.insert(new QualifiedTableName(null, "float_test"), record, Map.of(), WriteOverrides.NONE));
-
-        assertEquals(3.14f, readBack("float_test", "value_field", 1).getValue("value_field"));
-    }
-
-    @Test
-    @DisplayName("A record with a DOUBLE field writes to and reads back from a double column")
-    void testDouble() {
-        createTable("double_test", "double");
-        final RecordSchema schema = schemaFor(new RecordField("value_field", RecordFieldType.DOUBLE.getDataType()));
-        final MapRecord record = new MapRecord(schema, Map.of("id", 1, "value_field", 3.14159d));
-
-        assertDoesNotThrow(() -> sessionProvider.insert(new QualifiedTableName(null, "double_test"), record, Map.of(), WriteOverrides.NONE));
-
-        assertEquals(3.14159d, readBack("double_test", "value_field", 1).getValue("value_field"));
-    }
-
-    @Test
-    @DisplayName("A record with a DECIMAL field writes to and reads back from a decimal column")
-    void testDecimal() {
-        createTable("decimal_test", "decimal");
-        final RecordSchema schema = schemaFor(new RecordField("value_field", RecordFieldType.DECIMAL.getDataType()));
-        final BigDecimal expected = new BigDecimal("123.456");
-        final MapRecord record = new MapRecord(schema, Map.of("id", 1, "value_field", expected));
-
-        assertDoesNotThrow(() -> sessionProvider.insert(new QualifiedTableName(null, "decimal_test"), record, Map.of(), WriteOverrides.NONE));
-
-        assertEquals(expected, readBack("decimal_test", "value_field", 1).getValue("value_field"));
-    }
-
-    @Test
-    @DisplayName("A record with a DECIMAL field carrying explicit precision and scale writes to and reads back from a decimal column")
-    void testDecimalWithPrecisionAndScale() {
-        // RecordFieldType.DECIMAL is the only scalar-adjacent type (besides ENUM, covered by testEnum) with its own
-        // DataType subclass - DecimalDataType - so this exercises that logical type specifically, rather than the
-        // plain DataType used by testDecimal. CQL's "decimal" type itself has no fixed precision/scale (it stores
-        // an arbitrary-precision unscaled value), so the precision/scale here is purely NiFi-side schema
-        // metadata; the value must simply conform to it.
-        createTable("decimal_precision_scale_test", "decimal");
-        final RecordSchema schema = schemaFor(new RecordField("value_field", RecordFieldType.DECIMAL.getDecimalDataType(10, 2)));
-        final BigDecimal expected = new BigDecimal("12345678.90");
-        final MapRecord record = new MapRecord(schema, Map.of("id", 1, "value_field", expected));
-
-        assertDoesNotThrow(() -> sessionProvider.insert(new QualifiedTableName(null, "decimal_precision_scale_test"), record, Map.of(), WriteOverrides.NONE));
-
-        assertEquals(expected, readBack("decimal_precision_scale_test", "value_field", 1).getValue("value_field"));
-    }
-
-    @Test
-    @DisplayName("A record with a TIMESTAMP field writes to and reads back from a timestamp column")
-    void testTimestamp() {
-        createTable("timestamp_test", "timestamp");
-        final RecordSchema schema = schemaFor(new RecordField("value_field", RecordFieldType.TIMESTAMP.getDataType()));
-        // CQL's timestamp type only has millisecond resolution, unlike Instant.now()'s sub-millisecond
-        // precision, so the written value is truncated up front to make the round-trip comparison exact.
-        final Instant expected = Instant.now().truncatedTo(ChronoUnit.MILLIS);
-        final MapRecord record = new MapRecord(schema, Map.of("id", 1, "value_field", expected));
-
-        assertDoesNotThrow(() -> sessionProvider.insert(new QualifiedTableName(null, "timestamp_test"), record, Map.of(), WriteOverrides.NONE));
-
-        assertEquals(expected, readBack("timestamp_test", "value_field", 1).getValue("value_field"));
-    }
-
-    @Test
-    @DisplayName("A record with a DATE field writes to and reads back from a date column")
-    void testDate() {
-        createTable("date_test", "date");
-        final RecordSchema schema = schemaFor(new RecordField("value_field", RecordFieldType.DATE.getDataType()));
-        final LocalDate expected = LocalDate.now();
-        final MapRecord record = new MapRecord(schema, Map.of("id", 1, "value_field", expected));
-
-        assertDoesNotThrow(() -> sessionProvider.insert(new QualifiedTableName(null, "date_test"), record, Map.of(), WriteOverrides.NONE));
-
-        assertEquals(expected, readBack("date_test", "value_field", 1).getValue("value_field"));
-    }
-
-    @Test
-    @DisplayName("A record with a TIME field writes to and reads back from a time column")
-    void testTime() {
-        createTable("time_test", "time");
-        final RecordSchema schema = schemaFor(new RecordField("value_field", RecordFieldType.TIME.getDataType()));
-        final LocalTime expected = LocalTime.now();
-        final MapRecord record = new MapRecord(schema, Map.of("id", 1, "value_field", expected));
-
-        assertDoesNotThrow(() -> sessionProvider.insert(new QualifiedTableName(null, "time_test"), record, Map.of(), WriteOverrides.NONE));
-
-        assertEquals(expected, readBack("time_test", "value_field", 1).getValue("value_field"));
-    }
-
-    @Test
-    @DisplayName("A record with a UUID field writes to and reads back from a uuid column")
-    void testUuid() {
-        createTable("uuid_test", "uuid");
-        final RecordSchema schema = schemaFor(new RecordField("value_field", RecordFieldType.UUID.getDataType()));
-        final UUID expected = UUID.randomUUID();
-        final MapRecord record = new MapRecord(schema, Map.of("id", 1, "value_field", expected));
-
-        assertDoesNotThrow(() -> sessionProvider.insert(new QualifiedTableName(null, "uuid_test"), record, Map.of(), WriteOverrides.NONE));
-
-        assertEquals(expected, readBack("uuid_test", "value_field", 1).getValue("value_field"));
-    }
-
-    @Test
-    @DisplayName("A record with a version-1 (time-based) UUID field writes to and reads back from a timeuuid column")
-    void testTimeUuid() {
-        createTable("timeuuid_test", "timeuuid");
-        final RecordSchema schema = schemaFor(new RecordField("value_field", RecordFieldType.UUID.getDataType()));
-        final UUID expected = Uuids.timeBased();
-        final MapRecord record = new MapRecord(schema, Map.of("id", 1, "value_field", expected));
-
-        assertDoesNotThrow(() -> sessionProvider.insert(new QualifiedTableName(null, "timeuuid_test"), record, Map.of(), WriteOverrides.NONE));
-
-        assertEquals(expected, readBack("timeuuid_test", "value_field", 1).getValue("value_field"));
+        assertEquals(expected, readBack(tableName, "value_field", 1).getValue("value_field"));
     }
 
     @Test
@@ -361,45 +261,6 @@ public abstract class AbstractCqlRecordFieldTypeIT {
 
         assertTrue(exception.getMessage().contains(randomUuid.toString()),
                 "Expected the exception message to name the offending value, but was: " + exception.getMessage());
-    }
-
-    @Test
-    @DisplayName("A record with a CHAR field writes to and reads back from a text column")
-    void testChar() {
-        // CQL has no dedicated single-character type, so "text" is the natural fit for CHAR.
-        createTable("char_test", "text");
-        final RecordSchema schema = schemaFor(new RecordField("value_field", RecordFieldType.CHAR.getDataType()));
-        final MapRecord record = new MapRecord(schema, Map.of("id", 1, "value_field", "A"));
-
-        assertDoesNotThrow(() -> sessionProvider.insert(new QualifiedTableName(null, "char_test"), record, Map.of(), WriteOverrides.NONE));
-
-        assertEquals("A", readBack("char_test", "value_field", 1).getValue("value_field"));
-    }
-
-    @Test
-    @DisplayName("A record with an ENUM field writes to and reads back from a text column")
-    void testEnum() {
-        // CQL has no native enum type, so "text" is the natural fit, matching how NiFi itself
-        // represents an ENUM value as its String name.
-        createTable("enum_test", "text");
-        final RecordSchema schema = schemaFor(new RecordField("value_field", RecordFieldType.ENUM.getEnumDataType(List.of("ACTIVE", "INACTIVE"))));
-        final MapRecord record = new MapRecord(schema, Map.of("id", 1, "value_field", "ACTIVE"));
-
-        assertDoesNotThrow(() -> sessionProvider.insert(new QualifiedTableName(null, "enum_test"), record, Map.of(), WriteOverrides.NONE));
-
-        assertEquals("ACTIVE", readBack("enum_test", "value_field", 1).getValue("value_field"));
-    }
-
-    @Test
-    @DisplayName("A record with a STRING field writes to and reads back from a text column")
-    void testString() {
-        createTable("string_test", "text");
-        final RecordSchema schema = schemaFor(new RecordField("value_field", RecordFieldType.STRING.getDataType()));
-        final MapRecord record = new MapRecord(schema, Map.of("id", 1, "value_field", "hello world"));
-
-        assertDoesNotThrow(() -> sessionProvider.insert(new QualifiedTableName(null, "string_test"), record, Map.of(), WriteOverrides.NONE));
-
-        assertEquals("hello world", readBack("string_test", "value_field", 1).getValue("value_field"));
     }
 
     @Test
@@ -443,19 +304,6 @@ public abstract class AbstractCqlRecordFieldTypeIT {
         assertDoesNotThrow(() -> sessionProvider.insert(new QualifiedTableName(null, "set_test"), record, Map.of(), WriteOverrides.NONE));
 
         assertEquals(expected, readBack("set_test", "value_field", 1).getValue("value_field"));
-    }
-
-    @Test
-    @DisplayName("A record with a MAP of STRING field writes to and reads back from a map<text, text> column")
-    void testMap() {
-        createTable("map_test", "map<text, text>");
-        final RecordSchema schema = schemaFor(new RecordField("value_field", RecordFieldType.MAP.getMapDataType(RecordFieldType.STRING.getDataType())));
-        final Map<String, String> expected = Map.of("key1", "value1", "key2", "value2");
-        final MapRecord record = new MapRecord(schema, Map.of("id", 1, "value_field", expected));
-
-        assertDoesNotThrow(() -> sessionProvider.insert(new QualifiedTableName(null, "map_test"), record, Map.of(), WriteOverrides.NONE));
-
-        assertEquals(expected, readBack("map_test", "value_field", 1).getValue("value_field"));
     }
 
     @Test
@@ -669,19 +517,6 @@ public abstract class AbstractCqlRecordFieldTypeIT {
     }
 
     @Test
-    @DisplayName("A record with a BOOLEAN field holding a String value is coerced and reads back as a Boolean")
-    void testBooleanFromStringIsCoerced() {
-        createTable("boolean_coercion_test", "boolean");
-        final RecordSchema schema = schemaFor(new RecordField("value_field", RecordFieldType.BOOLEAN.getDataType()));
-        final MapRecord record = new MapRecord(schema, Map.of("id", 1, "value_field", "true"));
-
-        assertDoesNotThrow(() -> sessionProvider.insert(new QualifiedTableName(null, "boolean_coercion_test"), record, Map.of(), WriteOverrides.NONE));
-
-        // Reading back a genuine Boolean (not the original String) proves the coercion actually took effect.
-        assertEquals(Boolean.TRUE, readBack("boolean_coercion_test", "value_field", 1).getValue("value_field"));
-    }
-
-    @Test
     @DisplayName("A record with an INT field holding a String or a mismatched Number is coerced and reads back as an Integer")
     void testIntFromStringOrMismatchedNumberIsCoerced() {
         createTable("int_coercion_test", "int");
@@ -695,61 +530,5 @@ public abstract class AbstractCqlRecordFieldTypeIT {
         final MapRecord fromShort = new MapRecord(schema, Map.of("id", 2, "value_field", (short) 1234));
         assertDoesNotThrow(() -> sessionProvider.insert(new QualifiedTableName(null, "int_coercion_test"), fromShort, Map.of(), WriteOverrides.NONE));
         assertEquals(1234, readBack("int_coercion_test", "value_field", 2).getValue("value_field"));
-    }
-
-    @Test
-    @DisplayName("A record with a UUID field holding a String value is coerced and reads back as a UUID")
-    void testUuidFromStringIsCoerced() {
-        createTable("uuid_coercion_test", "uuid");
-        final RecordSchema schema = schemaFor(new RecordField("value_field", RecordFieldType.UUID.getDataType()));
-        final UUID expected = UUID.randomUUID();
-        final MapRecord record = new MapRecord(schema, Map.of("id", 1, "value_field", expected.toString()));
-
-        assertDoesNotThrow(() -> sessionProvider.insert(new QualifiedTableName(null, "uuid_coercion_test"), record, Map.of(), WriteOverrides.NONE));
-
-        assertEquals(expected, readBack("uuid_coercion_test", "value_field", 1).getValue("value_field"));
-    }
-
-    @Test
-    @DisplayName("A record with a CHAR field holding a Character instance is coerced and reads back as text")
-    void testCharFromCharacterInstanceIsCoerced() {
-        createTable("char_coercion_test", "text");
-        final RecordSchema schema = schemaFor(new RecordField("value_field", RecordFieldType.CHAR.getDataType()));
-        final MapRecord record = new MapRecord(schema, Map.of("id", 1, "value_field", 'A'));
-
-        assertDoesNotThrow(() -> sessionProvider.insert(new QualifiedTableName(null, "char_coercion_test"), record, Map.of(), WriteOverrides.NONE));
-
-        assertEquals("A", readBack("char_coercion_test", "value_field", 1).getValue("value_field"));
-    }
-
-    @Test
-    @DisplayName("A record with a DATE field holding a java.sql.Date value is coerced and reads back correctly via JavaSQLDateCodec")
-    void testDateFromSqlDateIsCoerced() {
-        createTable("date_coercion_test", "date");
-        final RecordSchema schema = schemaFor(new RecordField("value_field", RecordFieldType.DATE.getDataType()));
-        final Date sqlDate = Date.valueOf(LocalDate.of(2024, 3, 15));
-        final MapRecord record = new MapRecord(schema, Map.of("id", 1, "value_field", sqlDate));
-
-        assertDoesNotThrow(() -> sessionProvider.insert(new QualifiedTableName(null, "date_coercion_test"), record, Map.of(), WriteOverrides.NONE));
-
-        // Reads go through the driver's default DATE codec (LocalDate), since registering JavaSQLDateCodec adds
-        // an additional codec usable for binding a java.sql.Date value, but doesn't replace the driver's default
-        // for untyped reads like Row.getObject(int).
-        assertEquals(sqlDate.toLocalDate(), readBack("date_coercion_test", "value_field", 1).getValue("value_field"));
-    }
-
-    @Test
-    @DisplayName("A record with a TIME field holding a java.sql.Time value is coerced and reads back correctly via JavaSQLTimeCodec")
-    void testTimeFromSqlTimeIsCoerced() {
-        createTable("time_coercion_test", "time");
-        final RecordSchema schema = schemaFor(new RecordField("value_field", RecordFieldType.TIME.getDataType()));
-        final Time sqlTime = Time.valueOf(LocalTime.of(13, 45, 30));
-        final MapRecord record = new MapRecord(schema, Map.of("id", 1, "value_field", sqlTime));
-
-        assertDoesNotThrow(() -> sessionProvider.insert(new QualifiedTableName(null, "time_coercion_test"), record, Map.of(), WriteOverrides.NONE));
-
-        // Reads go through the driver's default TIME codec (LocalTime) for the same reason as
-        // testDateFromSqlDateIsCoerced above.
-        assertEquals(sqlTime.toLocalTime(), readBack("time_coercion_test", "value_field", 1).getValue("value_field"));
     }
 }

@@ -17,43 +17,53 @@
 package org.apache.nifi.service.cassandra;
 
 import org.apache.nifi.service.cql.api.QueryOverrides;
-import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.DisplayName;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.MethodSource;
 
 import java.time.Duration;
+import java.util.stream.Stream;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.params.provider.Arguments.arguments;
 
+/**
+ * Covers how a per-query override falls back to the connection service's configured default.
+ *
+ * <p>Both resolvers have the same three states - no overrides object at all, an overrides object that does not
+ * set this particular field, and one that does - and the first two must behave identically. Tabulating them
+ * is what makes that equivalence visible.
+ */
 public class CassandraCQLExecutionServiceQueryOverridesTest {
 
-    @Test
-    void testResolveFetchSizeUsesDefaultWhenOverridesIsNull() {
-        assertEquals(100, CassandraCQLExecutionService.resolveFetchSize(null, 100));
+    private static final int CONFIGURED_FETCH_SIZE = 100;
+
+    static Stream<Arguments> fetchSizeCases() {
+        return Stream.of(
+                arguments("no overrides supplied", null, CONFIGURED_FETCH_SIZE),
+                arguments("overrides supplied, fetch size not set", new QueryOverrides(null, null), CONFIGURED_FETCH_SIZE),
+                arguments("fetch size overridden", new QueryOverrides(50, null), 50));
     }
 
-    @Test
-    void testResolveFetchSizeUsesDefaultWhenFetchSizeNotOverridden() {
-        assertEquals(100, CassandraCQLExecutionService.resolveFetchSize(new QueryOverrides(null, null), 100));
+    @ParameterizedTest(name = "{0}")
+    @MethodSource("fetchSizeCases")
+    @DisplayName("Fetch size falls back to the configured default unless the query overrides it")
+    void testResolveFetchSize(final String description, final QueryOverrides overrides, final int expected) {
+        assertEquals(expected, CassandraCQLExecutionService.resolveFetchSize(overrides, CONFIGURED_FETCH_SIZE));
     }
 
-    @Test
-    void testResolveFetchSizeUsesOverrideWhenPresent() {
-        assertEquals(50, CassandraCQLExecutionService.resolveFetchSize(new QueryOverrides(50, null), 100));
+    static Stream<Arguments> timeoutCases() {
+        return Stream.of(
+                arguments("no overrides supplied", null, null),
+                arguments("overrides supplied, timeout not set", new QueryOverrides(null, null), null),
+                arguments("timeout overridden", new QueryOverrides(null, Duration.ofSeconds(5)), Duration.ofSeconds(5)));
     }
 
-    @Test
-    void testResolveTimeoutOverrideIsNullWhenOverridesIsNull() {
-        assertNull(CassandraCQLExecutionService.resolveTimeoutOverride(null));
-    }
-
-    @Test
-    void testResolveTimeoutOverrideIsNullWhenNotOverridden() {
-        assertNull(CassandraCQLExecutionService.resolveTimeoutOverride(new QueryOverrides(null, null)));
-    }
-
-    @Test
-    void testResolveTimeoutOverrideReturnsOverrideWhenPresent() {
-        final Duration timeout = Duration.ofSeconds(5);
-        assertEquals(timeout, CassandraCQLExecutionService.resolveTimeoutOverride(new QueryOverrides(null, timeout)));
+    @ParameterizedTest(name = "{0}")
+    @MethodSource("timeoutCases")
+    @DisplayName("Timeout resolves to null unless the query overrides it, leaving the driver's own default in force")
+    void testResolveTimeoutOverride(final String description, final QueryOverrides overrides, final Duration expected) {
+        assertEquals(expected, CassandraCQLExecutionService.resolveTimeoutOverride(overrides));
     }
 }
