@@ -20,13 +20,14 @@ package org.apache.nifi.processors.cql.mock;
 import org.apache.nifi.controller.AbstractControllerService;
 import org.apache.nifi.processor.exception.ProcessException;
 import org.apache.nifi.serialization.record.Record;
-import org.apache.nifi.service.cql.api.CQLExecutionService;
-import org.apache.nifi.service.cql.api.CQLQueryCallback;
-import org.apache.nifi.service.cql.api.CqlBatchType;
-import org.apache.nifi.service.cql.api.QueryOverrides;
+import org.apache.nifi.service.cql.api.service.CQLExecutionService;
+import org.apache.nifi.service.cql.api.service.CQLQueryCallback;
+import org.apache.nifi.service.cql.api.constants.CqlBatchType;
+import org.apache.nifi.service.cql.api.service.QueryOverrides;
 import org.apache.nifi.service.cql.api.exception.QueryFailureException;
-import org.apache.nifi.service.cql.api.UpdateMethod;
-import org.apache.nifi.service.cql.api.WriteOverrides;
+import org.apache.nifi.service.cql.api.constants.UpdateMethod;
+import org.apache.nifi.service.cql.api.service.WriteOverrides;
+import org.apache.nifi.service.cql.api.lookup.CqlStatementResult;
 import org.apache.nifi.service.cql.api.metadata.PrimaryKey;
 import org.apache.nifi.service.cql.api.metadata.PrimaryKeyIdentifier;
 import org.apache.nifi.service.cql.api.metadata.QualifiedTableName;
@@ -80,6 +81,17 @@ public class MockCQLQueryExecutionService extends AbstractControllerService impl
      * rethrown as a {@link ProcessException}. Cleanup on that path is easy to get wrong, and a mock that let
      * the callback's exception escape untouched would never exercise it.
      */
+    /**
+     * Unimplemented on purpose: nothing in {@code nifi-cql-processors} calls {@code execute} - it exists for
+     * callers reading values without a schema over them, such as a distributed map cache - so a mock return
+     * value here would only be a guess at behaviour no test exercises. Throwing keeps that honest, and makes
+     * the first processor to need it fail loudly rather than against a fiction.
+     */
+    @Override
+    public CqlStatementResult execute(String cql, List<Object> parameters, QueryOverrides overrides) {
+        throw new UnsupportedOperationException("execute() is not stubbed; no processor test needs it yet");
+    }
+
     @Override
     public void query(String cql, List<Object> parameters, CQLQueryCallback callback, QueryOverrides overrides) throws QueryFailureException {
         this.lastQueryOverrides = overrides;

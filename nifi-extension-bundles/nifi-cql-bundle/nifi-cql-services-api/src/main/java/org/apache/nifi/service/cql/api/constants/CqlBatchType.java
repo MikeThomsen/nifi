@@ -14,15 +14,18 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package org.apache.nifi.service.cql.api;
 
-import java.time.Duration;
+package org.apache.nifi.service.cql.api.constants;
+
+import org.apache.nifi.service.cql.api.service.CQLExecutionService;
 
 /**
- * Per-call overrides for a single {@link CQLExecutionService#query} invocation. Any field left {@code null}
- * means "use the value configured on the {@link CQLExecutionService} itself". Additional overrides can be
- * added here as new record components without changing the {@code query} method signature again.
+ * The type of batch statement to use when {@link CQLExecutionService} writes more than one record at a time.
+ * Mirrors Cassandra's own batch semantics: {@code COUNTER} is required for counter mutations, which cannot be
+ * mixed into a {@code LOGGED} or {@code UNLOGGED} batch.
  */
-public record QueryOverrides(Integer fetchSize, Duration timeout) {
-    public static final QueryOverrides NONE = new QueryOverrides(null, null);
+public enum CqlBatchType {
+    LOGGED,
+    UNLOGGED,
+    COUNTER
 }

@@ -23,10 +23,10 @@ import org.apache.nifi.provenance.ProvenanceEventRecord;
 import org.apache.nifi.record.path.RecordPath;
 import org.apache.nifi.serialization.record.MockRecordParser;
 import org.apache.nifi.serialization.record.RecordFieldType;
-import org.apache.nifi.service.cql.api.CQLExecutionService;
-import org.apache.nifi.service.cql.api.CqlBatchType;
-import org.apache.nifi.service.cql.api.UpdateMethod;
-import org.apache.nifi.service.cql.api.WriteOverrides;
+import org.apache.nifi.service.cql.api.service.CQLExecutionService;
+import org.apache.nifi.service.cql.api.constants.CqlBatchType;
+import org.apache.nifi.service.cql.api.constants.UpdateMethod;
+import org.apache.nifi.service.cql.api.service.WriteOverrides;
 import org.apache.nifi.service.cql.api.exception.QueryFailureException;
 import org.apache.nifi.service.cql.api.metadata.PrimaryKeyIdentifier;
 import org.apache.nifi.service.cql.api.metadata.QualifiedTableName;
@@ -360,6 +360,45 @@ public class PutCQLRecordTest {
         List<ProvenanceEventRecord> events = runner.getProvenanceEvents();
         assertEquals(1, events.size());
         assertTrue(events.get(0).getDetails().contains("100 total"));
+    }
+
+    @Test
+    @DisplayName("A configuration/data error partway through writing batches still reports what was already written")
+    void testMidStreamIllegalArgumentReportsProgress() {
+        runner.setProperty(PutCQLRecord.BATCH_SIZE, "100");
+
+        for (int i = 0; i < 250; i++) {
+            mockReader.addRecord("Hello, world", "test_user");
+        }
+
+        // First batch succeeds; the second fails the way a bad primary key override does - an
+        // IllegalArgumentException, taking the configuration-error path rather than the generic one.
+        doNothing().doThrow(new IllegalArgumentException("/missing evaluated to no values."))
+                .when(service)
+                .insert(any(QualifiedTableName.class), anyList(), anyMap(), any(CqlBatchType.class), any(WriteOverrides.class));
+
+        runner.enqueue("");
+        runner.run();
+
+        runner.assertAllFlowFilesTransferred(PutCQLRecord.REL_FAILURE, 1);
+
+        MockFlowFile failedFlowFile = runner.getFlowFilesForRelationship(PutCQLRecord.REL_FAILURE).get(0);
+        assertEquals("100", failedFlowFile.getAttribute(PutCQLRecord.RECORDS_WRITTEN_ATTRIBUTE));
+    }
+
+    @Test
+    @DisplayName("An invalid table name routes to failure with cql.records.written explicitly zero")
+    void testInvalidTableNameReportsZeroRecordsWritten() {
+        runner.setProperty(PutCQLRecord.TABLE, "not.a.valid.table.name");
+
+        mockReader.addRecord("Hello, world", "test_user");
+        runner.enqueue("");
+        runner.run();
+
+        runner.assertAllFlowFilesTransferred(PutCQLRecord.REL_FAILURE, 1);
+
+        MockFlowFile failedFlowFile = runner.getFlowFilesForRelationship(PutCQLRecord.REL_FAILURE).get(0);
+        assertEquals("0", failedFlowFile.getAttribute(PutCQLRecord.RECORDS_WRITTEN_ATTRIBUTE));
     }
 
     @Test

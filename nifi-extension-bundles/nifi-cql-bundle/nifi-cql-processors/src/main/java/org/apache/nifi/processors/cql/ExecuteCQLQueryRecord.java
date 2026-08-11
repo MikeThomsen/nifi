@@ -40,8 +40,8 @@ import org.apache.nifi.processor.Relationship;
 import org.apache.nifi.processor.exception.ProcessException;
 import org.apache.nifi.processor.util.StandardValidators;
 import org.apache.nifi.serialization.RecordSetWriterFactory;
-import org.apache.nifi.service.cql.api.CQLExecutionService;
-import org.apache.nifi.service.cql.api.QueryOverrides;
+import org.apache.nifi.service.cql.api.service.CQLExecutionService;
+import org.apache.nifi.service.cql.api.service.QueryOverrides;
 import org.apache.nifi.service.cql.api.exception.QueryFailureException;
 import org.apache.nifi.util.StopWatch;
 
@@ -56,7 +56,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
-@Tags({"cassandra", "cql", "select"})
+@Tags({"cassandra", "scylladb", "cql", "select"})
 @InputRequirement(InputRequirement.Requirement.INPUT_ALLOWED)
 @CapabilityDescription("Execute provided Cassandra Query Language (CQL) select query on a data store that supports CQL (Cassandra or ScyllaDB primarily). Using a" +
         " configured record writer service, it will convert result rows into any output format supported by NiFi's record API.")
@@ -202,12 +202,13 @@ public class ExecuteCQLQueryRecord extends AbstractCQLProcessor {
     public static final Relationship REL_ORIGINAL = new Relationship.Builder()
             .autoTerminateDefault(true)
             .name("original")
-            .description("Input flowfiles go to this relationship on success and to failure when the query fails")
+            .description("The incoming FlowFile that triggered the query is routed here once every resulting "
+                    + "FlowFile has been transferred to success, or immediately if the query returned no rows. "
+                    + "On a failed query the incoming FlowFile goes to failure or retry instead, never here.")
             .build();
 
     public static final List<PropertyDescriptor> PROPERTY_DESCRIPTORS = List.of(
             CONNECTION_PROVIDER_SERVICE,
-            CHARSET,
             OUTPUT_WRITER,
             CQL_SELECT_QUERY,
             FETCH_SIZE,
@@ -365,11 +366,15 @@ public class ExecuteCQLQueryRecord extends AbstractCQLProcessor {
             getLogger().debug("The query took {} seconds.", stopWatch.getDuration(TimeUnit.SECONDS));
         } catch (final QueryFailureException qee) {
             //The logger is called in the client service
-            if (fileToProcess == null || callback.hasSentOriginal()) {
-                fileToProcess = session.create();
+            if (context.hasIncomingConnection()) {
+                if (fileToProcess == null || callback.hasSentOriginal()) {
+                    fileToProcess = session.create();
+                }
+                fileToProcess = session.penalize(fileToProcess);
+                session.transfer(fileToProcess, REL_RETRY);
+            } else {
+                context.yield();
             }
-            fileToProcess = session.penalize(fileToProcess);
-            session.transfer(fileToProcess, REL_RETRY);
         } catch (final ProcessException e) {
             if (context.hasIncomingConnection()) {
                 logger.error(String.format("Unable to execute CQL select query %s for %s routing to failure",

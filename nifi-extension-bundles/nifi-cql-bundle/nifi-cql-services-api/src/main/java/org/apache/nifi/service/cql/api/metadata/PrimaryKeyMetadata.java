@@ -17,6 +17,8 @@
 
 package org.apache.nifi.service.cql.api.metadata;
 
+import org.apache.nifi.service.cql.api.constants.PrimaryKeyFieldType;
+
 /**
  * Describes one column of a table's primary key, as returned by {@code CQLExecutionService#getMetadata}
  * within a {@link PrimaryKey}'s {@code partitionKey()}/{@code clusteringKeys()} lists.

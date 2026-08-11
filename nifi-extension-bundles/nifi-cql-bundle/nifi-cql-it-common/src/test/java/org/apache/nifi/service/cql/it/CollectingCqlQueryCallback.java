@@ -17,7 +17,7 @@
 package org.apache.nifi.service.cql.it;
 
 import org.apache.nifi.serialization.record.Record;
-import org.apache.nifi.service.cql.api.CQLQueryCallback;
+import org.apache.nifi.service.cql.api.service.CQLQueryCallback;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -36,7 +36,7 @@ public class CollectingCqlQueryCallback implements CQLQueryCallback {
     private int clearCount;
 
     @Override
-    public void receive(final long rowNumber, final Record result, final boolean isExhausted) {
+    public void receive(final long rowNumber, final Record result, final boolean hasMore) {
         records.add(result);
     }
 

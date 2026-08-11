@@ -25,7 +25,7 @@ import org.apache.nifi.processor.exception.ProcessException;
 import org.apache.nifi.serialization.RecordSetWriter;
 import org.apache.nifi.serialization.RecordSetWriterFactory;
 import org.apache.nifi.serialization.record.RecordSchema;
-import org.apache.nifi.service.cql.api.CQLQueryCallback;
+import org.apache.nifi.service.cql.api.service.CQLQueryCallback;
 
 import java.io.Closeable;
 import java.io.OutputStream;

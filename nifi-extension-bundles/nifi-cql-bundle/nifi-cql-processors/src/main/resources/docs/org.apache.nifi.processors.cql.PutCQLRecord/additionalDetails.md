@@ -19,8 +19,8 @@
 
 _PutCQLRecord_ is a record-aware processor that reads each FlowFile using the configured _Record Reader_ and
 writes the resulting records to an Apache Cassandra or ScyllaDB table, using either a CQL `INSERT` or `UPDATE`
-statement, via the connection provided by the configured _CQL Session Provider_ controller service (either
-`CassandraCQLExecutionService` or `ScyllaDBCQLExecutionService`). Records are grouped into batches (see
+statement, via the connection provided by the configured _Cassandra Connection Provider_ controller service
+(either `CassandraCQLExecutionService` or `ScyllaDBCQLExecutionService`). Records are grouped into batches (see
 _Batch size_) and written as a single Cassandra `BatchStatement` per batch, one prepared statement per
 FlowFile.
 

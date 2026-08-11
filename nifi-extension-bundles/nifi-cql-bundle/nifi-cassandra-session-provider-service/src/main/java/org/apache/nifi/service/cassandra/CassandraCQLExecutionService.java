@@ -43,6 +43,7 @@ import com.datastax.oss.driver.api.core.type.DataTypes;
 import com.datastax.oss.driver.api.core.type.ListType;
 import com.datastax.oss.driver.api.core.type.MapType;
 import com.datastax.oss.driver.api.core.type.SetType;
+import com.datastax.oss.driver.api.core.type.TupleType;
 import com.datastax.oss.driver.api.core.type.UserDefinedType;
 import com.datastax.oss.driver.api.core.type.codec.registry.MutableCodecRegistry;
 import com.datastax.oss.driver.api.querybuilder.QueryBuilder;
@@ -92,16 +93,23 @@ import org.apache.nifi.service.cassandra.mapping.FlexibleTinyIntCodec;
 import org.apache.nifi.service.cassandra.mapping.JavaSQLDateCodec;
 import org.apache.nifi.service.cassandra.mapping.JavaSQLTimeCodec;
 import org.apache.nifi.service.cassandra.mapping.JavaSQLTimestampCodec;
-import org.apache.nifi.service.cql.api.CQLExecutionService;
-import org.apache.nifi.service.cql.api.CQLQueryCallback;
-import org.apache.nifi.service.cql.api.CqlBatchType;
-import org.apache.nifi.service.cql.api.QueryOverrides;
-import org.apache.nifi.service.cql.api.UpdateMethod;
-import org.apache.nifi.service.cql.api.WriteOverrides;
+import org.apache.nifi.service.cql.api.service.CQLExecutionService;
+import org.apache.nifi.service.cql.api.service.CQLQueryCallback;
+import org.apache.nifi.service.cql.api.service.ContactPoints;
+import org.apache.nifi.service.cql.api.lookup.CqlCell;
+import org.apache.nifi.service.cql.api.lookup.CqlRow;
+import org.apache.nifi.service.cql.api.lookup.CqlStatementResult;
+import org.apache.nifi.service.cql.api.lookup.impl.StandardCqlCell;
+import org.apache.nifi.service.cql.api.lookup.impl.StandardCqlRow;
+import org.apache.nifi.service.cql.api.lookup.impl.StandardCqlStatementResult;
+import org.apache.nifi.service.cql.api.constants.CqlBatchType;
+import org.apache.nifi.service.cql.api.service.QueryOverrides;
+import org.apache.nifi.service.cql.api.constants.UpdateMethod;
+import org.apache.nifi.service.cql.api.service.WriteOverrides;
 import org.apache.nifi.service.cql.api.exception.QueryFailureException;
 import org.apache.nifi.record.path.RecordPath;
 import org.apache.nifi.service.cql.api.metadata.PrimaryKey;
-import org.apache.nifi.service.cql.api.metadata.PrimaryKeyFieldType;
+import org.apache.nifi.service.cql.api.constants.PrimaryKeyFieldType;
 import org.apache.nifi.service.cql.api.metadata.PrimaryKeyIdentifier;
 import org.apache.nifi.service.cql.api.metadata.PrimaryKeyMetadata;
 import org.apache.nifi.service.cql.api.metadata.QualifiedTableName;
@@ -121,27 +129,32 @@ import java.util.stream.Stream;
 import javax.net.ssl.SSLContext;
 
 @Tags({"cassandra", "cql", "database", "connection", "session", "pooling"})
-@CapabilityDescription("Provides connection session for Cassandra processors to work with Apache Cassandra.")
+@CapabilityDescription("Provides a CQL connection session for CQL processors and controller services to work with Apache Cassandra. "
+        + "Use this service for Apache Cassandra clusters; use ScyllaDBCQLExecutionService for ScyllaDB.")
 // Referenced by name rather than by class: a session provider has no business depending on the modules that consume
 // it, and nifi-cql-processors in particular could not accept the dependency - the driver this module carries is what
 // its ban-database-client-dependencies enforcer rule exists to keep out.
 @SeeAlso(classNames = {
         "org.apache.nifi.processors.cql.PutCQLRecord",
         "org.apache.nifi.processors.cql.ExecuteCQLQueryRecord",
-        "org.apache.nifi.service.cql.CQLDistributedMapCache",
+        "org.apache.nifi.service.cql.cache.CQLDistributedMapCache",
         "org.apache.nifi.service.scylladb.ScyllaDBCQLExecutionService"
 })
 public class CassandraCQLExecutionService extends AbstractControllerService implements CQLExecutionService, VerifiableControllerService {
 
-    public static final int DEFAULT_CASSANDRA_PORT = 9042;
+    public static final int DEFAULT_CASSANDRA_PORT = ContactPoints.DEFAULT_PORT;
+
+    /**
+     * The column a conditional statement's outcome arrives in. Named with brackets by the protocol precisely
+     * because no CQL identifier may contain them, so it can never collide with a real column.
+     */
+    private static final String APPLIED_COLUMN = "[applied]";
 
     /**
      * Bind marker name for an explicit per-record write timestamp (see {@link WriteOverrides#timestampField()}).
      * Namespaced to make an accidental collision with a real column name effectively impossible.
      */
     private static final String WRITE_TIMESTAMP_BIND_MARKER = "nifi_write_timestamp";
-
-    // Common descriptors
 
     private CqlSession cassandraSession;
 
@@ -230,7 +243,6 @@ public class CassandraCQLExecutionService extends AbstractControllerService impl
                 throw new ProcessException("There was an error registering conversion codecs.", ex);
             }
 
-            // Create the cluster and connect to it
             cassandraSession = cqlSession;
         }
     }
@@ -386,24 +398,16 @@ public class CassandraCQLExecutionService extends AbstractControllerService impl
         return results;
     }
 
+    /**
+     * Parsing is delegated to {@link ContactPoints}, the same rules the property's validator applies, so a
+     * value that validated cannot fail here and an Expression-Language-produced value that skipped validation
+     * fails with the same messages it would have gotten from the validator. Name resolution happens at this
+     * point, not during parsing.
+     */
     private List<InetSocketAddress> getContactPoints(String contactPointList) {
-
-        if (contactPointList == null) {
-            return new ArrayList<>();
-        }
-
-        final String[] contactPointStringList = contactPointList.split(",");
-        List<InetSocketAddress> contactPoints = new ArrayList<>();
-
-        for (String contactPointEntry : contactPointStringList) {
-            String[] addresses = contactPointEntry.split(":");
-            final String hostName = addresses[0].trim();
-            final int port = (addresses.length > 1) ? Integer.parseInt(addresses[1].trim()) : DEFAULT_CASSANDRA_PORT;
-
-            contactPoints.add(new InetSocketAddress(hostName, port));
-        }
-
-        return contactPoints;
+        return ContactPoints.parse(contactPointList).stream()
+                .map(contactPoint -> new InetSocketAddress(contactPoint.host(), contactPoint.port()))
+                .collect(Collectors.toList());
     }
 
     private void cacheMetadata(QualifiedTableName table) {
@@ -451,19 +455,7 @@ public class CassandraCQLExecutionService extends AbstractControllerService impl
 
     @Override
     public void query(String cql, List<Object> parameters, CQLQueryCallback callback, QueryOverrides overrides) throws QueryFailureException {
-        SimpleStatementBuilder statementBuilder = SimpleStatement.builder(cql)
-                .setPageSize(resolveFetchSize(overrides, pageSize));
-
-        final Duration timeoutOverride = resolveTimeoutOverride(overrides);
-        if (timeoutOverride != null) {
-            statementBuilder = statementBuilder.setTimeout(timeoutOverride);
-        }
-
-        SimpleStatement statement = statementBuilder.build();
-        PreparedStatement preparedStatement = cassandraSession.prepare(statement);
-
-        BoundStatement boundStatement = parameters != null && !parameters.isEmpty()
-                ? preparedStatement.bind(toBindValues(preparedStatement, parameters)) : preparedStatement.bind();
+        BoundStatement boundStatement = bindStatement(cql, parameters, overrides);
 
         AtomicReference<RecordSchema> schemaReference = new AtomicReference<>();
 
@@ -514,6 +506,105 @@ public class CassandraCQLExecutionService extends AbstractControllerService impl
             callback.clear();
             throw new ProcessException("Error querying CQL", ex);
         }
+    }
+
+    @Override
+    public CqlStatementResult execute(final String cql, final List<Object> parameters, final QueryOverrides overrides)
+            throws QueryFailureException {
+        final BoundStatement boundStatement = bindStatement(cql, parameters, overrides);
+
+        try {
+            final ResultSet results = cassandraSession.execute(boundStatement);
+            final boolean wasApplied = results.wasApplied();
+
+            // The outcome column is present exactly when the statement was conditional - wasApplied() alone
+            // cannot tell us, since it also returns true for every unconditional statement.
+            final boolean conditional = results.getColumnDefinitions().contains(APPLIED_COLUMN);
+
+            // A conditional write that applied has no prior value to report, so it reports no rows. The
+            // backends disagree about what they send in that case: Cassandra returns the outcome column
+            // alone, ScyllaDB returns the other columns alongside it. Normalizing here is the whole point of
+            // having one API over both - otherwise callers would find rows().isEmpty() backend-dependent.
+            if (conditional && wasApplied) {
+                return new StandardCqlStatementResult(true, List.of());
+            }
+
+            final List<CqlRow> rows = new ArrayList<>();
+            for (final Row row : results) {
+                rows.add(new StandardCqlRow(toCells(row)));
+            }
+
+            return new StandardCqlStatementResult(wasApplied, rows);
+        } catch (QueryExecutionException | AllNodesFailedException | DriverTimeoutException qee) {
+            getLogger().error("Error executing statement", qee);
+            throw new QueryFailureException();
+        } catch (Exception ex) {
+            throw new ProcessException("Error executing CQL", ex);
+        }
+    }
+
+    /**
+     * Converts one driver row into cells, dropping the conditional-outcome column. That column is reported
+     * through {@link CqlStatementResult#wasApplied()} instead: it is a statement-level fact, and its name -
+     * {@code [applied]} - is not a legal identifier in CQL or in a NiFi record schema, so representing it as
+     * data would push that problem onto every caller.
+     */
+    private List<CqlCell> toCells(final Row row) {
+        final ColumnDefinitions definitions = row.getColumnDefinitions();
+        final List<CqlCell> cells = new ArrayList<>(definitions.size());
+
+        for (int index = 0; index < definitions.size(); index++) {
+            final String columnName = definitions.get(index).getName().toString();
+            if (APPLIED_COLUMN.equals(columnName)) {
+                continue;
+            }
+
+            final DataType columnType = definitions.get(index).getType();
+            cells.add(hasJdkRepresentation(columnType)
+                    ? new StandardCqlCell(columnName, row.getObject(index))
+                    : StandardCqlCell.unsupported(columnName, columnType.asCql(true, false)));
+        }
+
+        return cells;
+    }
+
+    /**
+     * Whether a CQL type decodes to something from the JDK rather than to a driver class. User defined types,
+     * tuples and {@code duration} decode to {@code UdtValue}, {@code TupleValue} and {@code CqlDuration}
+     * respectively, and handing one of those to a caller would put a driver class on the far side of an API
+     * whose whole purpose is that no driver class crosses it. Collections are checked through to their
+     * elements, since a {@code list<some_udt>} decodes to a JDK List of driver objects.
+     */
+    private static boolean hasJdkRepresentation(final DataType type) {
+        return switch (type) {
+            case UserDefinedType ignored -> false;
+            case TupleType ignored -> false;
+            case ListType list -> hasJdkRepresentation(list.getElementType());
+            case SetType set -> hasJdkRepresentation(set.getElementType());
+            case MapType map -> hasJdkRepresentation(map.getKeyType()) && hasJdkRepresentation(map.getValueType());
+            default -> !DataTypes.DURATION.equals(type);
+        };
+    }
+
+    /**
+     * Builds and binds a statement, applying any per-call fetch size and timeout overrides. Shared by
+     * {@link #query} and {@link #execute}, which differ only in what they do with the result.
+     */
+    private BoundStatement bindStatement(final String cql, final List<Object> parameters, final QueryOverrides overrides) {
+        SimpleStatementBuilder statementBuilder = SimpleStatement.builder(cql)
+                .setPageSize(resolveFetchSize(overrides, pageSize));
+
+        final Duration timeoutOverride = resolveTimeoutOverride(overrides);
+        if (timeoutOverride != null) {
+            statementBuilder = statementBuilder.setTimeout(timeoutOverride);
+        }
+
+        final SimpleStatement statement = statementBuilder.build();
+        final PreparedStatement preparedStatement = cassandraSession.prepare(statement);
+
+        return parameters != null && !parameters.isEmpty()
+                ? preparedStatement.bind(toBindValues(preparedStatement, parameters))
+                : preparedStatement.bind();
     }
 
     static int resolveFetchSize(final QueryOverrides overrides, final int defaultFetchSize) {
@@ -708,7 +799,7 @@ public class CassandraCQLExecutionService extends AbstractControllerService impl
         final int nrOfColumns = (columnDefinitions == null ? 0 : columnDefinitions.size());
         String tableName = "NiFi_Cassandra_Query_Record";
         if (nrOfColumns > 0) {
-            String tableNameFromMeta = columnDefinitions.get(0).getTable().toString(); //.getTable(0);
+            String tableNameFromMeta = columnDefinitions.get(0).getTable().toString();
             if (!StringUtils.isBlank(tableNameFromMeta)) {
                 tableName = tableNameFromMeta;
             }
@@ -736,7 +827,6 @@ public class CassandraCQLExecutionService extends AbstractControllerService impl
                                              Map<PrimaryKeyIdentifier, RecordPath> primaryKeyOverrides, List<String> deleteKeyNames) {
         RecordSchema schema = record.getSchema();
 
-        // Split up the update key names separated by a comma, should not be empty
         if (deleteKeyNames == null || deleteKeyNames.isEmpty()) {
             throw new IllegalArgumentException("No delete keys were specified");
         }
@@ -772,7 +862,6 @@ public class CassandraCQLExecutionService extends AbstractControllerService impl
 
         List<String> keysUsedInOrder = new ArrayList<>();
 
-        // Split up the update key names separated by a comma, should not be empty
         if (updateKeyNames == null || updateKeyNames.isEmpty()) {
             throw new IllegalArgumentException("No Update Keys were specified");
         }
@@ -788,7 +877,6 @@ public class CassandraCQLExecutionService extends AbstractControllerService impl
             }
         }
 
-        // Prepare keyspace/table names
         UpdateStart updateQueryStart = cassandraTable.isQualified()
                 ? QueryBuilder.update(cassandraTable.keyspace(), cassandraTable.table())
                 : QueryBuilder.update(cassandraTable.table());

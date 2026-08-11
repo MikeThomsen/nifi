@@ -16,7 +16,7 @@
  */
 package org.apache.nifi.service.cassandra;
 
-import org.apache.nifi.service.cql.api.QueryOverrides;
+import org.apache.nifi.service.cql.api.service.QueryOverrides;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;

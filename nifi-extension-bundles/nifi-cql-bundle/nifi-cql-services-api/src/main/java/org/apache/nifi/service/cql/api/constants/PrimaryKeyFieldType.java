@@ -15,19 +15,20 @@
  * limitations under the License.
  */
 
-package org.apache.nifi.service.cql.api;
+package org.apache.nifi.service.cql.api.constants;
+
+import org.apache.nifi.service.cql.api.metadata.PrimaryKey;
+import org.apache.nifi.service.cql.api.metadata.PrimaryKeyIdentifier;
+import org.apache.nifi.service.cql.api.metadata.PrimaryKeyMetadata;
 
 /**
- * How an {@link CQLExecutionService#update} call applies a record's non-key fields to a row's columns.
- * {@code INCREMENT}/{@code DECREMENT} only make sense for a counter column, and require the batch statement
- * type to be {@code COUNTER} or {@code UNLOGGED}, since Cassandra/ScyllaDB reject counter mutations in any
- * other batch type.
+ * Which part of a table's primary key a {@link PrimaryKeyMetadata}/{@link PrimaryKeyIdentifier} describes:
+ * a table's partition key determines which node(s) hold a row; its clustering columns determine row order
+ * within a partition. See {@link PrimaryKey}.
  */
-public enum UpdateMethod {
-    /** Subtracts a field's value from a counter column. */
-    DECREMENT,
-    /** Adds a field's value to a counter column. */
-    INCREMENT,
-    /** Overwrites a column's value. */
-    SET
+public enum PrimaryKeyFieldType {
+    /** A clustering column - orders rows within a partition. */
+    CLUSTERING,
+    /** A partition key column - determines which partition a row belongs to. */
+    PARTITION
 }

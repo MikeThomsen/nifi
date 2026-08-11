@@ -23,14 +23,12 @@ import org.apache.nifi.processor.AbstractProcessor;
 import org.apache.nifi.processor.ProcessContext;
 import org.apache.nifi.processor.Relationship;
 import org.apache.nifi.processor.util.StandardValidators;
-import org.apache.nifi.service.cql.api.CQLExecutionService;
+import org.apache.nifi.service.cql.api.service.CQLExecutionService;
 
-import java.util.ArrayList;
-import java.util.List;
 import java.util.concurrent.atomic.AtomicReference;
 
 /**
- * AbstractCassandraProcessor is a base class for Cassandra processors and contains logic and variables common to most
+ * AbstractCQLProcessor is a base class for Cassandra processors and contains logic and variables common to most
  * processors integrating with Apache Cassandra.
  */
 public abstract class AbstractCQLProcessor extends AbstractProcessor {
@@ -41,15 +39,6 @@ public abstract class AbstractCQLProcessor extends AbstractProcessor {
             .description("Specifies the Cassandra connection providing controller service to be used to connect to Cassandra cluster.")
             .required(true)
             .identifiesControllerService(CQLExecutionService.class)
-            .build();
-
-    static final PropertyDescriptor CHARSET = new PropertyDescriptor.Builder()
-            .name("Character Set")
-            .description("Specifies the character set of the record data.")
-            .required(true)
-            .expressionLanguageSupported(ExpressionLanguageScope.FLOWFILE_ATTRIBUTES)
-            .defaultValue("UTF-8")
-            .addValidator(StandardValidators.CHARACTER_SET_VALIDATOR)
             .build();
 
     static final Relationship REL_SUCCESS = new Relationship.Builder()
@@ -66,13 +55,6 @@ public abstract class AbstractCQLProcessor extends AbstractProcessor {
             .description("A FlowFile is transferred to this relationship if the operation cannot be completed but attempting "
                     + "it again may succeed.")
             .build();
-
-    protected static List<PropertyDescriptor> descriptors = new ArrayList<>();
-
-    static {
-        descriptors.add(CONNECTION_PROVIDER_SERVICE);
-        descriptors.add(CHARSET);
-    }
 
     protected final AtomicReference<CQLExecutionService> cqlSessionService = new AtomicReference<>(null);
 

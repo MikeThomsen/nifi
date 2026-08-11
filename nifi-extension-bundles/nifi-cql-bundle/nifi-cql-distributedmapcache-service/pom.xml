@@ -24,10 +24,6 @@
     <artifactId>nifi-cql-distributedmapcache-service</artifactId>
     <packaging>jar</packaging>
 
-    <properties>
-        <driver.version>4.19.3</driver.version>
-    </properties>
-
     <dependencies>
         <dependency>
             <groupId>org.apache.nifi</groupId>
@@ -44,107 +40,56 @@
             <artifactId>nifi-distributed-cache-client-service-api</artifactId>
             <scope>provided</scope>
         </dependency>
-        <dependency>
-            <groupId>org.apache.cassandra</groupId>
-            <artifactId>java-driver-core</artifactId>
-            <version>${driver.version}</version>
-        </dependency>
-        <dependency>
-            <groupId>org.apache.cassandra</groupId>
-            <artifactId>java-driver-query-builder</artifactId>
-            <version>${driver.version}</version>
-        </dependency>
-        <dependency>
-            <groupId>org.apache.nifi</groupId>
-            <artifactId>nifi-ssl-context-service-api</artifactId>
-        </dependency>
+        <!--
+          No database client dependency, at any scope. This service reaches the cluster through the
+          CQLExecutionService it is configured with, so the driver is a session provider's concern rather than
+          this module's - which the ban-database-client-dependencies rule below enforces rather than assumes.
+        -->
 
         <dependency>
             <groupId>org.apache.nifi</groupId>
             <artifactId>nifi-mock</artifactId>
             <scope>test</scope>
         </dependency>
-        <dependency>
-            <groupId>org.testcontainers</groupId>
-            <artifactId>testcontainers-cassandra</artifactId>
-            <scope>test</scope>
-        </dependency>
-        <dependency>
-            <groupId>org.testcontainers</groupId>
-            <artifactId>testcontainers-scylladb</artifactId>
-            <scope>test</scope>
-        </dependency>
-        <dependency>
-            <groupId>org.testcontainers</groupId>
-            <artifactId>testcontainers-junit-jupiter</artifactId>
-            <version>${testcontainers.version}</version>
-            <scope>test</scope>
-        </dependency>
     </dependencies>
 
-    <profiles>
-        <profile>
-            <!--
-            Cassandra is the default backend for this module's integration tests: a bare `mvn verify` here
-            runs CQLDistributedMapCacheCassandraIT with no extra flags. Activating any other profile (e.g.
-            -Pscylladb) deactivates this one automatically, per Maven's activeByDefault semantics.
-            -->
-            <id>cassandra</id>
-            <activation>
-                <activeByDefault>true</activeByDefault>
-            </activation>
-            <properties>
-                <it.backend>cassandra</it.backend>
-            </properties>
-            <build>
-                <plugins>
-                    <plugin>
-                        <groupId>org.apache.maven.plugins</groupId>
-                        <artifactId>maven-failsafe-plugin</artifactId>
+    <build>
+        <plugins>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-enforcer-plugin</artifactId>
+                <executions>
+                    <execution>
+                        <id>ban-database-client-dependencies</id>
+                        <goals>
+                            <goal>enforce</goal>
+                        </goals>
                         <configuration>
-                            <systemPropertyVariables>
-                                <it.backend>${it.backend}</it.backend>
-                            </systemPropertyVariables>
+                            <rules>
+                                <bannedDependencies>
+                                    <message>
+                                        This cache reaches the cluster through the CQLExecutionService it is
+                                        configured with, never through a driver directly, so no database client
+                                        library belongs on this module's classpath at any scope. An integration
+                                        test needing a live cluster belongs in a module that owns a backend -
+                                        see DistributedMapCacheIT in nifi-cql-distributedmapcache-service-it.
+                                    </message>
+                                    <searchTransitive>true</searchTransitive>
+                                    <excludes>
+                                        <!-- DataStax Java Driver 4.x, as published under both coordinates -->
+                                        <exclude>org.apache.cassandra:java-driver-*</exclude>
+                                        <exclude>com.datastax.oss:*</exclude>
+                                        <!-- DataStax Java Driver 3.x, which Testcontainers' Cassandra module drags in -->
+                                        <exclude>com.datastax.cassandra:*</exclude>
+                                        <!-- ScyllaDB's shard-aware fork of the same driver -->
+                                        <exclude>com.scylladb:*</exclude>
+                                    </excludes>
+                                </bannedDependencies>
+                            </rules>
                         </configuration>
-                        <executions>
-                            <execution>
-                                <goals>
-                                    <goal>integration-test</goal>
-                                    <goal>verify</goal>
-                                </goals>
-                            </execution>
-                        </executions>
-                    </plugin>
-                </plugins>
-            </build>
-        </profile>
-        <profile>
-            <!-- Runs CQLDistributedMapCacheScyllaDBIT instead of the Cassandra IT; see the cassandra profile above. -->
-            <id>scylladb</id>
-            <properties>
-                <it.backend>scylladb</it.backend>
-            </properties>
-            <build>
-                <plugins>
-                    <plugin>
-                        <groupId>org.apache.maven.plugins</groupId>
-                        <artifactId>maven-failsafe-plugin</artifactId>
-                        <configuration>
-                            <systemPropertyVariables>
-                                <it.backend>${it.backend}</it.backend>
-                            </systemPropertyVariables>
-                        </configuration>
-                        <executions>
-                            <execution>
-                                <goals>
-                                    <goal>integration-test</goal>
-                                    <goal>verify</goal>
-                                </goals>
-                            </execution>
-                        </executions>
-                    </plugin>
-                </plugins>
-            </build>
-        </profile>
-    </profiles>
+                    </execution>
+                </executions>
+            </plugin>
+        </plugins>
+    </build>
 </project>

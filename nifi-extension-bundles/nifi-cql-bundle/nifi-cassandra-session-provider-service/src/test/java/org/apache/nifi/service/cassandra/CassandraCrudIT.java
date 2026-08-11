@@ -18,7 +18,7 @@
 package org.apache.nifi.service.cassandra;
 
 import com.datastax.oss.driver.api.core.CqlSession;
-import org.apache.nifi.service.cql.api.CQLExecutionService;
+import org.apache.nifi.service.cql.api.service.CQLExecutionService;
 import org.apache.nifi.service.cql.it.AbstractCqlCrudIT;
 import org.apache.nifi.service.cql.it.CqlConnectionInfo;
 import org.junit.jupiter.api.AfterAll;

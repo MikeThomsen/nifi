@@ -30,7 +30,6 @@ import org.apache.nifi.annotation.documentation.CapabilityDescription;
 import org.apache.nifi.annotation.documentation.SeeAlso;
 import org.apache.nifi.annotation.documentation.Tags;
 import org.apache.nifi.annotation.documentation.UseCase;
-import org.apache.nifi.annotation.lifecycle.OnEnabled;
 import org.apache.nifi.annotation.lifecycle.OnScheduled;
 import org.apache.nifi.annotation.lifecycle.OnShutdown;
 import org.apache.nifi.annotation.lifecycle.OnUnscheduled;
@@ -38,7 +37,6 @@ import org.apache.nifi.components.PropertyDescriptor;
 import org.apache.nifi.components.PropertyValue;
 import org.apache.nifi.components.ValidationContext;
 import org.apache.nifi.components.ValidationResult;
-import org.apache.nifi.controller.ConfigurationContext;
 import org.apache.nifi.expression.ExpressionLanguageScope;
 import org.apache.nifi.flowfile.FlowFile;
 import org.apache.nifi.processor.ProcessContext;
@@ -56,10 +54,10 @@ import org.apache.nifi.serialization.RecordReader;
 import org.apache.nifi.serialization.RecordReaderFactory;
 import org.apache.nifi.serialization.record.Record;
 import org.apache.nifi.serialization.record.RecordSchema;
-import org.apache.nifi.service.cql.api.CQLExecutionService;
-import org.apache.nifi.service.cql.api.CqlBatchType;
-import org.apache.nifi.service.cql.api.UpdateMethod;
-import org.apache.nifi.service.cql.api.WriteOverrides;
+import org.apache.nifi.service.cql.api.service.CQLExecutionService;
+import org.apache.nifi.service.cql.api.constants.CqlBatchType;
+import org.apache.nifi.service.cql.api.constants.UpdateMethod;
+import org.apache.nifi.service.cql.api.service.WriteOverrides;
 import org.apache.nifi.service.cql.api.exception.QueryFailureException;
 import org.apache.nifi.service.cql.api.metadata.PrimaryKeyIdentifier;
 import org.apache.nifi.service.cql.api.metadata.QualifiedTableName;
@@ -79,7 +77,6 @@ import java.util.stream.Stream;
 import static java.lang.String.format;
 import static org.apache.nifi.processors.cql.constants.BatchStatementType.BATCH_STATEMENT_TYPE_USE_ATTR_TYPE;
 import static org.apache.nifi.processors.cql.constants.BatchStatementType.COUNTER_TYPE;
-import static org.apache.nifi.processors.cql.constants.BatchStatementType.LOGGED_TYPE;
 import static org.apache.nifi.processors.cql.constants.BatchStatementType.UNLOGGED_TYPE;
 import static org.apache.nifi.processors.cql.constants.StatementType.INSERT_TYPE;
 import static org.apache.nifi.processors.cql.constants.StatementType.STATEMENT_TYPE_USE_ATTR_TYPE;
@@ -87,10 +84,11 @@ import static org.apache.nifi.processors.cql.constants.StatementType.UPDATE_TYPE
 import static org.apache.nifi.processors.cql.constants.UpdateType.DECR_TYPE;
 import static org.apache.nifi.processors.cql.constants.UpdateType.INCR_TYPE;
 
-@Tags({"cassandra", "cql", "put", "insert", "update", "set", "record"})
+@Tags({"cassandra", "scylladb", "cql", "put", "insert", "update", "set", "record"})
 @InputRequirement(InputRequirement.Requirement.INPUT_REQUIRED)
 @CapabilityDescription("This is a record aware processor that reads the content of the incoming FlowFile as individual records using the " +
-        "configured 'Record Reader' and writes them to Apache Cassandra using native protocol version 3 or higher.")
+        "configured 'Record Reader' and writes them to a data store that supports CQL (Cassandra or ScyllaDB primarily), as inserts or " +
+        "updates, individually or in batches.")
 @ReadsAttributes({
         @ReadsAttribute(attribute = "cql.statement.type", description = "If 'Use cql.statement.type Attribute' is selected for the Statement " +
                 "Type property, the value of the cql.statement.type Attribute will be used to determine which type of statement (UPDATE, INSERT) " +
@@ -380,7 +378,8 @@ public class PutCQLRecord extends AbstractCQLProcessor {
             qualifiedTableName = qualifyTable(cassandraTable);
         } catch (IllegalArgumentException e) {
             getLogger().error("Error processing", e);
-            session.transfer(inputFlowFile, REL_FAILURE);
+            // Nothing has been read yet, but cql.records.written is promised on every failure, so say 0 explicitly.
+            session.transfer(session.putAttribute(inputFlowFile, RECORDS_WRITTEN_ATTRIBUTE, "0"), REL_FAILURE);
             return;
         }
 
@@ -390,14 +389,12 @@ public class PutCQLRecord extends AbstractCQLProcessor {
         final int batchSize = context.getProperty(BATCH_SIZE).evaluateAttributeExpressions().asInteger();
         final String updateKeys = context.getProperty(UPDATE_KEYS).evaluateAttributeExpressions(inputFlowFile).getValue();
 
-        // Get the statement type from the attribute if necessary
         final String statementTypeProperty = context.getProperty(STATEMENT_TYPE).getValue();
         String statementType = statementTypeProperty;
         if (STATEMENT_TYPE_USE_ATTR_TYPE.getValue().equals(statementTypeProperty)) {
             statementType = inputFlowFile.getAttribute(STATEMENT_TYPE_ATTRIBUTE);
         }
 
-        // Get the update method from the attribute if necessary
         final String updateMethodProperty = context.getProperty(UPDATE_METHOD).getValue();
         String updateMethod = updateMethodProperty;
         if (UpdateType.UPDATE_METHOD_USE_ATTR_TYPE.getValue().equals(updateMethodProperty)) {
@@ -406,7 +403,6 @@ public class PutCQLRecord extends AbstractCQLProcessor {
         }
 
 
-        // Get the batch statement type from the attribute if necessary
         final String batchStatementTypeProperty = context.getProperty(BATCH_STATEMENT_TYPE).getValue();
         String batchStatementType = batchStatementTypeProperty;
 
@@ -439,17 +435,14 @@ public class PutCQLRecord extends AbstractCQLProcessor {
         try (final InputStream inputStream = session.read(inputFlowFile);
              final RecordReader reader = recordParserFactory.createRecordReader(inputFlowFile, inputStream, getLogger())) {
 
-            // throw an exception if statement type is not set
             if (StringUtils.isEmpty(statementType)) {
                 throw new IllegalArgumentException(format("Statement Type is not specified, FlowFile %s", inputFlowFile));
             }
 
-            // throw an exception if the statement type is set to update and updateKeys is empty
             if (UPDATE_TYPE.getValue().equalsIgnoreCase(statementType) && StringUtils.isEmpty(updateKeys)) {
                 throw new IllegalArgumentException(format("Update Keys are not specified, FlowFile %s", inputFlowFile));
             }
 
-            // throw an exception if the statement type is update and update method is not set
             if (UPDATE_TYPE.getValue().equalsIgnoreCase(statementType) && StringUtils.isBlank(updateMethod)) {
                 throw new IllegalArgumentException(format("Update Method is not specified, FlowFile %s", inputFlowFile));
             }
@@ -460,7 +453,6 @@ public class PutCQLRecord extends AbstractCQLProcessor {
                     .filter(key -> StringUtils.isNotEmpty(key))
                     .toList() : List.of();
 
-            // throw an exception if the Update Method is Increment or Decrement and the batch statement type is not UNLOGGED or COUNTER
             if (INCR_TYPE.getValue().equalsIgnoreCase(updateMethod) || DECR_TYPE.getValue().equalsIgnoreCase(updateMethod)) {
                 if (!(UNLOGGED_TYPE.getValue().equalsIgnoreCase(batchStatementType) || COUNTER_TYPE.getValue().equalsIgnoreCase(batchStatementType))) {
                     throw new IllegalArgumentException(format("Increment/Decrement Update Method can only be used with COUNTER " +
@@ -530,8 +522,11 @@ public class PutCQLRecord extends AbstractCQLProcessor {
             session.transfer(session.penalize(flowFileToRetry), REL_RETRY);
         } catch (IllegalArgumentException e) {
             error = true;
+            // Also reachable mid-stream (an override RecordPath resolving to zero values on a later record),
+            // so earlier batches may already be committed - report them, as the failure paths below do.
+            final FlowFile failedFlowFile = session.putAttribute(inputFlowFile, RECORDS_WRITTEN_ATTRIBUTE, String.valueOf(recordsAdded.get()));
             getLogger().error("Invalid PutCQLRecord configuration for {}", inputFlowFile, e);
-            session.transfer(inputFlowFile, REL_FAILURE);
+            session.transfer(failedFlowFile, REL_FAILURE);
         } catch (Exception e) {
             error = true;
             final FlowFile failedFlowFile = session.putAttribute(inputFlowFile, RECORDS_WRITTEN_ATTRIBUTE, String.valueOf(recordsAdded.get()));

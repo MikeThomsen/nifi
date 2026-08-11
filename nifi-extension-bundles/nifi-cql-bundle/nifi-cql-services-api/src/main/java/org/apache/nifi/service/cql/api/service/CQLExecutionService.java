@@ -14,7 +14,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package org.apache.nifi.service.cql.api;
+package org.apache.nifi.service.cql.api.service;
 
 import org.apache.nifi.components.PropertyDescriptor;
 import org.apache.nifi.components.resource.ResourceCardinality;
@@ -23,7 +23,12 @@ import org.apache.nifi.controller.ControllerService;
 import org.apache.nifi.expression.ExpressionLanguageScope;
 import org.apache.nifi.processor.util.StandardValidators;
 import org.apache.nifi.record.path.RecordPath;
+import org.apache.nifi.service.cql.api.constants.ConnectionCompression;
+import org.apache.nifi.service.cql.api.constants.CqlBatchType;
+import org.apache.nifi.service.cql.api.constants.CqlConsistencyLevel;
+import org.apache.nifi.service.cql.api.constants.UpdateMethod;
 import org.apache.nifi.service.cql.api.exception.QueryFailureException;
+import org.apache.nifi.service.cql.api.lookup.CqlStatementResult;
 import org.apache.nifi.service.cql.api.metadata.PrimaryKey;
 import org.apache.nifi.service.cql.api.metadata.PrimaryKeyIdentifier;
 import org.apache.nifi.service.cql.api.metadata.QualifiedTableName;
@@ -33,22 +38,24 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * Connection abstraction for Apache Cassandra/ScyllaDB, consumed by {@code PutCQLRecord} and
- * {@code ExecuteCQLQueryRecord} without either processor needing to know which backend-specific driver
- * implementation ({@code CassandraCQLExecutionService} or {@code ScyllaDBCQLExecutionService}) is actually
- * configured. Property descriptors here are shared connection settings (contact points, datacenter,
- * credentials, TLS, timeouts, etc.) that both implementations expose identically; the methods below are the
- * query/write contract every implementation must provide.
+ * Connection abstraction for Apache Cassandra/ScyllaDB, consumed by {@code PutCQLRecord},
+ * {@code ExecuteCQLQueryRecord} and {@code CQLDistributedMapCache} without any of them needing to know which
+ * backend-specific driver implementation ({@code CassandraCQLExecutionService} or
+ * {@code ScyllaDBCQLExecutionService}) is actually configured. Property descriptors here are shared
+ * connection settings (contact points, datacenter, credentials, TLS, timeouts, etc.) that both
+ * implementations expose identically; the methods below are the query/write contract every implementation
+ * must provide.
  */
 public interface CQLExecutionService extends ControllerService {
     PropertyDescriptor CONTACT_POINTS = new PropertyDescriptor.Builder()
             .name("Cassandra Contact Points")
-            .description("Contact points are addresses of Cassandra nodes. The list of contact points should be "
-                    + "comma-separated and in hostname:port format. Example node1:port,node2:port,...."
-                    + " The default client port for Cassandra is 9042, but the port(s) must be explicitly specified.")
+            .description("Contact points are addresses of Cassandra nodes, as a comma-separated list of "
+                    + "hostname:port entries - for example node1:9042,node2:9042. An IPv6 address must be "
+                    + "bracketed to carry a port, as [::1]:9042. If an entry names no port, the default "
+                    + "client port of 9042 is used.")
             .required(true)
             .expressionLanguageSupported(ExpressionLanguageScope.ENVIRONMENT)
-            .addValidator(StandardValidators.HOSTNAME_PORT_LIST_VALIDATOR)
+            .addValidator(ContactPoints.VALIDATOR)
             .build();
 
     PropertyDescriptor DATACENTER = new PropertyDescriptor.Builder()
@@ -65,7 +72,7 @@ public interface CQLExecutionService extends ControllerService {
                     "include the keyspace name before any table reference, in case of 'query' native processors or " +
                     "if the processor supports the 'Table' property, the keyspace name has to be provided with the " +
                     "table name in the form of <KEYSPACE>.<TABLE>")
-            .required(true)
+            .required(false)
             .expressionLanguageSupported(ExpressionLanguageScope.ENVIRONMENT)
             .addValidator(StandardValidators.NON_EMPTY_VALIDATOR)
             .build();
@@ -105,8 +112,9 @@ public interface CQLExecutionService extends ControllerService {
 
     PropertyDescriptor FETCH_SIZE = new PropertyDescriptor.Builder()
             .name("Fetch size")
-            .description("The number of result rows to be fetched from the result set at a time. Zero is the default "
-                    + "and means there is no limit.")
+            .description("The number of result rows to be fetched from the result set at a time - the page size the "
+                    + "driver requests per round trip, not a cap on total rows returned. Zero is the default and means "
+                    + "the driver's own default page size (5000) is used.")
             .defaultValue("0")
             .required(true)
             .expressionLanguageSupported(ExpressionLanguageScope.ENVIRONMENT)
@@ -123,7 +131,7 @@ public interface CQLExecutionService extends ControllerService {
             .build();
 
     PropertyDescriptor READ_TIMEOUT = new PropertyDescriptor.Builder()
-            .name("Read Timout")
+            .name("Read Timeout")
             .description("Read timeout. 0 means no timeout. If no value is set, the underlying default will be used.")
             .required(false)
             .defaultValue("30 sec")
@@ -191,12 +199,37 @@ public interface CQLExecutionService extends ControllerService {
      * or empty for a statement with no parameters. Implementations are expected to convert each value to the
      * Java type its bind marker's declared CQL type requires, so a value supplied as text still binds to a
      * non-text column
-     * @param callback invoked once per result row, and finally with {@code isExhausted = true} on the last row
+     * @param callback invoked once per result row; the last row is delivered with {@code hasMore = false}
      * @param overrides per-call fetch size/timeout overrides; use {@link QueryOverrides#NONE} for none
      * @throws QueryFailureException if the query failed at the driver/server level (as opposed to, for
      * example, malformed input, which implementations may instead surface as an unchecked exception)
      */
     void query(String cql, List<Object> parameters, CQLQueryCallback callback, QueryOverrides overrides) throws QueryFailureException;
+
+    /**
+     * Executes a statement and returns its outcome, including whether a conditional write applied.
+     *
+     * <p>This is the counterpart to {@link #query}, for two things that method cannot express. The first is
+     * the outcome of a conditional write - {@code IF NOT EXISTS}, {@code IF EXISTS}, {@code IF <condition>} -
+     * which is a statement-level fact with nowhere to live in a per-row callback, and which a caller
+     * implementing compare-and-set has no way to work around: reading before writing is not the same
+     * operation and is not safe under concurrency. The second is reading values without a schema over them,
+     * for a caller that already owns its encoding and would only have to undo any conversion applied on its
+     * behalf.
+     *
+     * <p>Intended for statements with a bounded result - conditional writes, single-row lookups, existence
+     * probes - because the rows are materialized before returning. {@link #query} remains the entry point for
+     * result sets large enough to need streaming.
+     *
+     * @param cql the CQL statement text, with {@code ?} bind markers for any positional {@code parameters}.
+     * Not restricted to {@code SELECT}
+     * @param parameters positional values bound to {@code cql}'s bind markers, in order; may be {@code null}
+     * or empty. Converted to the Java type each bind marker's declared CQL type requires, as in {@link #query}
+     * @param overrides per-call fetch size/timeout overrides; use {@link QueryOverrides#NONE} for none
+     * @return the statement's outcome; never {@code null}
+     * @throws QueryFailureException if the statement failed at the driver/server level
+     */
+    CqlStatementResult execute(String cql, List<Object> parameters, QueryOverrides overrides) throws QueryFailureException;
 
     /**
      * Writes a single record to {@code table} via {@code INSERT}. Each record field is written to the column

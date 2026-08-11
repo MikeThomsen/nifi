@@ -14,7 +14,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package org.apache.nifi.service.cql.api;
+package org.apache.nifi.service.cql.api.service;
 
 import java.time.Duration;
 

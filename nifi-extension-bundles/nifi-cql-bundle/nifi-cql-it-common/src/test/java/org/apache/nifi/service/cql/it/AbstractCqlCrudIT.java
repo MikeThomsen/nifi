@@ -24,14 +24,16 @@ import org.apache.nifi.serialization.record.MapRecord;
 import org.apache.nifi.serialization.record.RecordField;
 import org.apache.nifi.serialization.record.RecordFieldType;
 import org.apache.nifi.serialization.record.RecordSchema;
-import org.apache.nifi.service.cql.api.CQLExecutionService;
-import org.apache.nifi.service.cql.api.CqlBatchType;
-import org.apache.nifi.service.cql.api.QueryOverrides;
-import org.apache.nifi.service.cql.api.UpdateMethod;
-import org.apache.nifi.service.cql.api.WriteOverrides;
+import org.apache.nifi.service.cql.api.service.CQLExecutionService;
+import org.apache.nifi.service.cql.api.lookup.CqlRow;
+import org.apache.nifi.service.cql.api.lookup.CqlStatementResult;
+import org.apache.nifi.service.cql.api.constants.CqlBatchType;
+import org.apache.nifi.service.cql.api.service.QueryOverrides;
+import org.apache.nifi.service.cql.api.constants.UpdateMethod;
+import org.apache.nifi.service.cql.api.service.WriteOverrides;
 import org.apache.nifi.service.cql.api.exception.QueryFailureException;
 import org.apache.nifi.service.cql.api.metadata.PrimaryKey;
-import org.apache.nifi.service.cql.api.metadata.PrimaryKeyFieldType;
+import org.apache.nifi.service.cql.api.constants.PrimaryKeyFieldType;
 import org.apache.nifi.service.cql.api.metadata.PrimaryKeyMetadata;
 import org.apache.nifi.service.cql.api.metadata.QualifiedTableName;
 import org.apache.nifi.util.TestRunner;
@@ -40,6 +42,8 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInstance;
 
+import java.nio.ByteBuffer;
+import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
@@ -49,6 +53,7 @@ import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -493,5 +498,131 @@ public abstract class AbstractCqlCrudIT {
 
         assertNotNull(first);
         assertEquals(first, second);
+    }
+
+    // ---- execute(): conditional writes and schema-free reads -------------------------------------------
+    //
+    // These are the paths query() cannot express: a statement-level outcome, and values read without a
+    // schema imposed on them. Both matter for a caller doing compare-and-set over opaque bytes.
+
+    private String kvTable() {
+        session.execute("create table if not exists " + connectionInfo.keyspace()
+                + ".execute_kv (k blob primary key, v blob)");
+        return connectionInfo.keyspace() + ".execute_kv";
+    }
+
+    private static ByteBuffer bytes(final String value) {
+        return ByteBuffer.wrap(value.getBytes(StandardCharsets.UTF_8));
+    }
+
+    @Test
+    @DisplayName("An unconditional statement reports wasApplied, so a caller that never writes conditionally has no special case")
+    void testExecuteUnconditionalWriteIsApplied() {
+        final String table = kvTable();
+
+        final CqlStatementResult result = sessionProvider.execute("insert into " + table + " (k, v) values (?, ?)",
+                List.of(bytes("uncond"), bytes("value")), QueryOverrides.NONE);
+
+        assertTrue(result.wasApplied());
+        assertTrue(result.rows().isEmpty(), "an unconditional insert returns no rows");
+    }
+
+    @Test
+    @DisplayName("A conditional write that applies reports true and returns no row, since there was no prior value")
+    void testExecuteConditionalWriteApplied() {
+        final String table = kvTable();
+
+        final CqlStatementResult result = sessionProvider.execute(
+                "insert into " + table + " (k, v) values (?, ?) if not exists",
+                List.of(bytes("lwt-new"), bytes("first")), QueryOverrides.NONE);
+
+        assertTrue(result.wasApplied());
+        assertTrue(result.rows().isEmpty(),
+                () -> "expected no rows for an applied conditional write, got " + result.rows().size());
+    }
+
+    @Test
+    @DisplayName("A conditional write that is rejected returns the stored row, which is what makes compare-and-set one round trip")
+    void testExecuteConditionalWriteRejectedCarriesStoredRow() {
+        final String table = kvTable();
+        sessionProvider.execute("insert into " + table + " (k, v) values (?, ?)",
+                List.of(bytes("lwt-existing"), bytes("original")), QueryOverrides.NONE);
+
+        final CqlStatementResult result = sessionProvider.execute(
+                "insert into " + table + " (k, v) values (?, ?) if not exists",
+                List.of(bytes("lwt-existing"), bytes("attempted")), QueryOverrides.NONE);
+
+        assertFalse(result.wasApplied());
+        assertEquals(1, result.rows().size());
+
+        final CqlRow stored = result.rows().getFirst();
+        assertArrayEquals("original".getBytes(StandardCharsets.UTF_8), stored.getBytes("v"),
+                "the losing writer must see the value that is actually stored");
+
+        // The outcome is reported by wasApplied(), not as data: "[applied]" is not a legal identifier, and
+        // surfacing it as a column would push that problem onto every caller.
+        assertFalse(stored.columnNames().contains("[applied]"),
+                () -> "the outcome column leaked into the row: " + stored.columnNames());
+    }
+
+    @Test
+    @DisplayName("A conditional delete reports whether it applied and returns the row it removed")
+    void testExecuteConditionalDelete() {
+        final String table = kvTable();
+        sessionProvider.execute("insert into " + table + " (k, v) values (?, ?)",
+                List.of(bytes("to-delete"), bytes("doomed")), QueryOverrides.NONE);
+
+        final CqlStatementResult deleted = sessionProvider.execute(
+                "delete from " + table + " where k = ? if exists", List.of(bytes("to-delete")), QueryOverrides.NONE);
+        assertTrue(deleted.wasApplied());
+
+        final CqlStatementResult again = sessionProvider.execute(
+                "delete from " + table + " where k = ? if exists", List.of(bytes("to-delete")), QueryOverrides.NONE);
+        assertFalse(again.wasApplied(), "deleting an absent row must not report as applied");
+    }
+
+    @Test
+    @DisplayName("Blob values round-trip as bytes, with no schema imposed on an encoding the caller owns")
+    void testExecuteBlobRoundTrip() {
+        final String table = kvTable();
+        final byte[] payload = "opaque bytes".getBytes(StandardCharsets.UTF_8);
+
+        sessionProvider.execute("insert into " + table + " (k, v) values (?, ?)",
+                List.of(bytes("roundtrip"), ByteBuffer.wrap(payload)), QueryOverrides.NONE);
+
+        final CqlStatementResult result = sessionProvider.execute("select k, v from " + table + " where k = ?",
+                List.of(bytes("roundtrip")), QueryOverrides.NONE);
+
+        assertEquals(1, result.rows().size());
+        assertArrayEquals(payload, result.rows().getFirst().getBytes("v"));
+    }
+
+    @Test
+    @DisplayName("Cells arrive in selection order, and a column name that is not a legal identifier survives intact")
+    void testExecuteExposesCellsInSelectionOrder() {
+        final String table = kvTable();
+        sessionProvider.execute("insert into " + table + " (k, v) values (?, ?)",
+                List.of(bytes("cells"), bytes("value")), QueryOverrides.NONE);
+
+        final CqlStatementResult result = sessionProvider.execute(
+                "select v, writetime(v), k from " + table + " where k = ?", List.of(bytes("cells")), QueryOverrides.NONE);
+
+        final CqlRow row = result.rows().getFirst();
+        assertEquals(List.of("v", "writetime(v)", "k"), row.columnNames(),
+                "selection order is the only ordering information a schema-free caller has");
+        assertNotNull(row.getObject("writetime(v)"),
+                "a projected function's column name is not a legal identifier, and must survive anyway");
+    }
+
+    @Test
+    @DisplayName("A query returning no rows yields an empty result rather than a null one")
+    void testExecuteEmptyResult() {
+        final String table = kvTable();
+
+        final CqlStatementResult result = sessionProvider.execute("select v from " + table + " where k = ?",
+                List.of(bytes("never-written")), QueryOverrides.NONE);
+
+        assertTrue(result.rows().isEmpty());
+        assertTrue(result.wasApplied(), "a plain SELECT is unconditional");
     }
 }

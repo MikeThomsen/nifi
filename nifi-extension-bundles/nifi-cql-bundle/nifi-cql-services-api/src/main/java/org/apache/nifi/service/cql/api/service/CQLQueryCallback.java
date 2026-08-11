@@ -15,7 +15,7 @@
  * limitations under the License.
  */
 
-package org.apache.nifi.service.cql.api;
+package org.apache.nifi.service.cql.api.service;
 
 import org.apache.nifi.serialization.record.Record;
 
@@ -28,9 +28,10 @@ public interface CQLQueryCallback {
      * @param rowNumber the 1-based position of {@code result} within this query's result set
      * @param result a single row, converted to a {@link Record} using a schema derived from the result set's
      * own column metadata
-     * @param isExhausted {@code true} if this is the last row in the result set
+     * @param hasMore {@code true} if at least one more row follows this one; {@code false} on the last row,
+     * which is the implementation's signal to finalize whatever it has been accumulating
      */
-    void receive(long rowNumber, Record result, boolean isExhausted);
+    void receive(long rowNumber, Record result, boolean hasMore);
 
     /**
      * This method will be called when a session provider service needs to be able to signal that a fatal error

@@ -40,6 +40,7 @@
         <module>nifi-cassandra-session-provider-service</module>
         <module>nifi-cassandra-session-provider-service-nar</module>
         <module>nifi-cql-distributedmapcache-service</module>
+        <module>nifi-cql-distributedmapcache-service-it</module>
         <module>nifi-cql-distributedmapcache-service-nar</module>
         <module>nifi-scylladb-session-provider-service</module>
         <module>nifi-scylladb-session-provider-service-nar</module>

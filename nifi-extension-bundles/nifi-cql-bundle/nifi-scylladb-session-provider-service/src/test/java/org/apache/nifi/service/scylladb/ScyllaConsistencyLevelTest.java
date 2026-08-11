@@ -18,7 +18,7 @@
 package org.apache.nifi.service.scylladb;
 
 import com.datastax.oss.driver.api.core.DefaultConsistencyLevel;
-import org.apache.nifi.service.cql.api.CqlConsistencyLevel;
+import org.apache.nifi.service.cql.api.constants.CqlConsistencyLevel;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.EnumSource;

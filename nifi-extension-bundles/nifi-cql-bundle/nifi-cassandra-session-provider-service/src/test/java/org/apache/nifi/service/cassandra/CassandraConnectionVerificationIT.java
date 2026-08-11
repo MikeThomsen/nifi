@@ -18,7 +18,7 @@
 package org.apache.nifi.service.cassandra;
 
 import com.datastax.oss.driver.api.core.CqlSession;
-import org.apache.nifi.service.cql.api.CQLExecutionService;
+import org.apache.nifi.service.cql.api.service.CQLExecutionService;
 import org.apache.nifi.service.cql.it.AbstractCqlConnectionVerificationIT;
 import org.apache.nifi.service.cql.it.CqlConnectionInfo;
 import org.junit.jupiter.api.AfterAll;
@@ -33,7 +33,7 @@ import org.testcontainers.junit.jupiter.Testcontainers;
 /**
  * Connection/{@code verify()} coverage from {@link AbstractCqlConnectionVerificationIT} run against a real
  * Cassandra container. Real-credential authentication (against a container with {@code
- * PasswordAuthenticator} enabled) is covered separately in {@link CassandraCQLExecutionServiceConnectionIT},
+ * PasswordAuthenticator} enabled) is covered separately in {@link CassandraAuthenticationIT},
  * since it requires a dedicated, differently-configured container per test. Runs against every supported
  * Cassandra major version when {@code -DTEST_CASSANDRA_OLDER_VERSIONS=true} is set; otherwise only the
  * current major version runs (see {@link CassandraTestVersions}).

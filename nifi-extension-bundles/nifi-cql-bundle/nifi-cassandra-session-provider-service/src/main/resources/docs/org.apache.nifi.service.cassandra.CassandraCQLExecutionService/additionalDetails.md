@@ -18,12 +18,18 @@
 ## Description
 
 _CassandraCQLExecutionService_ implements `CQLExecutionService`, the connection abstraction that
-`PutCQLRecord` and `ExecuteCQLQueryRecord` depend on to talk to Apache Cassandra. It owns a single shared
-`CqlSession` for the lifetime of the controller service: the session is opened once, when the service is
-enabled, and closed when the service is disabled. It is not used by `CQLDistributedMapCache`, which builds
-and manages its own, independent `CqlSession` directly rather than depending on this service - the two
-happen to expose the same connection property names (`Cassandra Contact Points`, `Cassandra Datacenter`,
-etc.) for a consistent configuration experience, but are otherwise unrelated implementations.
+`PutCQLRecord`, `ExecuteCQLQueryRecord` and `CQLDistributedMapCache` depend on to talk to Apache Cassandra.
+It owns a single shared `CqlSession` for the lifetime of the controller service: the session is opened once,
+when the service is enabled, and closed when the service is disabled.
+
+Every component above reaches the cluster through this service rather than through a driver of its own, so
+the connection is configured **once, here** - contact points, credentials, TLS, and the driver configuration
+below are shared by all of them, and none of those settings are repeated on the components themselves.
+`CQLDistributedMapCache` in particular opens no session at all; its module carries no database driver on the
+classpath at any scope, and it takes this service through its _CQL Execution Service_ property.
+
+For a ScyllaDB cluster, use `ScyllaDBCQLExecutionService` instead. It is a subclass of this service and
+behaves identically - everything documented here applies to it unchanged.
 
 ## Properties
 
@@ -41,9 +47,10 @@ etc.) for a consistent configuration experience, but are otherwise unrelated imp
   `require_client_auth: true` - needs no separate setting here: it is enabled purely by referencing a service
   that has a keystore configured, whose certificate is what this service presents when the cluster asks for
   one.
-* **Fetch size** - default page size for query result sets; `0` means no limit. Can be overridden per query
-  via `ExecuteCQLQueryRecord`'s own _Fetch Size_ property.
-* **Read Timout** / **Connect Timeout** - driver-level request and connection timeouts. _Read Timout_ can be
+* **Fetch size** - default page size for query result sets - how many rows the driver requests per round
+  trip, not a cap on total rows returned; `0` means the driver's own default page size (5000) is used. Can be
+  overridden per query via `ExecuteCQLQueryRecord`'s own _Fetch Size_ property.
+* **Read Timeout** / **Connect Timeout** - driver-level request and connection timeouts. _Read Timeout_ can be
   overridden per query via `ExecuteCQLQueryRecord`'s own _Max Wait Time_ property.
 * **Consistency Level** - the driver's default request consistency level.
 * **Compression Type** - transport-level compression for requests/responses.

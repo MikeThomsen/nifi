@@ -18,7 +18,7 @@
 package org.apache.nifi.service.scylladb;
 
 import com.datastax.oss.driver.api.core.CqlSession;
-import org.apache.nifi.service.cql.api.CQLExecutionService;
+import org.apache.nifi.service.cql.api.service.CQLExecutionService;
 import org.apache.nifi.service.cql.it.AbstractCqlSslIT;
 import org.junit.jupiter.api.TestInstance;
 import org.testcontainers.junit.jupiter.Testcontainers;

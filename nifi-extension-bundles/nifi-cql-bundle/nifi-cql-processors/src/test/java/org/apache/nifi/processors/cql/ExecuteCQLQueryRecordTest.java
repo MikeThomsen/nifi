@@ -26,7 +26,7 @@ import org.apache.nifi.serialization.record.MockRecordWriter;
 import org.apache.nifi.serialization.record.Record;
 import org.apache.nifi.serialization.record.RecordField;
 import org.apache.nifi.serialization.record.RecordFieldType;
-import org.apache.nifi.service.cql.api.QueryOverrides;
+import org.apache.nifi.service.cql.api.service.QueryOverrides;
 import org.apache.nifi.util.MockFlowFile;
 import org.apache.nifi.util.TestRunner;
 import org.apache.nifi.util.TestRunners;
@@ -225,6 +225,33 @@ public class ExecuteCQLQueryRecordTest {
         testRunner.assertTransferCount(ExecuteCQLQueryRecord.REL_SUCCESS, 0);
         testRunner.assertTransferCount(ExecuteCQLQueryRecord.REL_ORIGINAL, 0);
         assertTrue(testRunner.getFlowFilesForRelationship(ExecuteCQLQueryRecord.REL_RETRY).getFirst().isPenalized());
+    }
+
+    @Test
+    @DisplayName("A query failure with no incoming connection yields the processor instead of routing an empty FlowFile to retry")
+    public void testSourceModeQueryFailureYieldsInsteadOfRouting() throws Exception {
+        final MockCQLQueryExecutionService service =
+                new MockCQLQueryExecutionService(Collections.<Record>emptyList().iterator()).failAfter(0);
+
+        testRunner.setProperty(ExecuteCQLQueryRecord.CONNECTION_PROVIDER_SERVICE, "connection");
+        testRunner.addControllerService("connection", service);
+        testRunner.enableControllerService(service);
+        testRunner.setProperty(ExecuteCQLQueryRecord.OUTPUT_WRITER, "writer");
+        final MockRecordWriter writer = new MockRecordWriter();
+        testRunner.addControllerService("writer", writer);
+        testRunner.enableControllerService(writer);
+        testRunner.assertValid();
+
+        testRunner.setIncomingConnection(false);
+        testRunner.run();
+
+        // Nothing routed anywhere - a created-from-nothing FlowFile has no attributes to re-drive the query,
+        // so the retry is the next scheduled run, signalled by yielding.
+        testRunner.assertTransferCount(ExecuteCQLQueryRecord.REL_RETRY, 0);
+        testRunner.assertTransferCount(ExecuteCQLQueryRecord.REL_FAILURE, 0);
+        testRunner.assertTransferCount(ExecuteCQLQueryRecord.REL_SUCCESS, 0);
+        testRunner.assertTransferCount(ExecuteCQLQueryRecord.REL_ORIGINAL, 0);
+        assertTrue(((org.apache.nifi.util.MockProcessContext) testRunner.getProcessContext()).isYieldCalled());
     }
 
     @Test

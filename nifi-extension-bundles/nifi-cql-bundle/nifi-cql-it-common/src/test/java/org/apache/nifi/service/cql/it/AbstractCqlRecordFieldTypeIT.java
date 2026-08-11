@@ -18,6 +18,7 @@ package org.apache.nifi.service.cql.it;
 
 import com.datastax.oss.driver.api.core.CqlSession;
 import com.datastax.oss.driver.api.core.DriverTimeoutException;
+import com.datastax.oss.driver.api.core.connection.HeartbeatException;
 import com.datastax.oss.driver.api.core.data.UdtValue;
 import com.datastax.oss.driver.api.core.uuid.Uuids;
 import org.apache.nifi.serialization.SimpleRecordSchema;
@@ -26,10 +27,10 @@ import org.apache.nifi.serialization.record.DataType;
 import org.apache.nifi.serialization.record.RecordField;
 import org.apache.nifi.serialization.record.RecordFieldType;
 import org.apache.nifi.serialization.record.RecordSchema;
-import org.apache.nifi.service.cql.api.CQLExecutionService;
-import org.apache.nifi.service.cql.api.CQLQueryCallback;
-import org.apache.nifi.service.cql.api.QueryOverrides;
-import org.apache.nifi.service.cql.api.WriteOverrides;
+import org.apache.nifi.service.cql.api.service.CQLExecutionService;
+import org.apache.nifi.service.cql.api.service.CQLQueryCallback;
+import org.apache.nifi.service.cql.api.service.QueryOverrides;
+import org.apache.nifi.service.cql.api.service.WriteOverrides;
 import org.apache.nifi.service.cql.api.metadata.QualifiedTableName;
 import org.apache.nifi.util.TestRunner;
 import org.apache.nifi.util.TestRunners;
@@ -118,20 +119,23 @@ public abstract class AbstractCqlRecordFieldTypeIT {
     }
 
     /**
-     * Executes a schema-modifying statement, retrying on {@link DriverTimeoutException}. ScyllaDB's Raft-based
-     * schema management (and, less often, Cassandra's own schema agreement) occasionally takes longer than the
-     * configured request timeout to settle a single DDL statement even though the cluster is otherwise healthy,
-     * so a bare timeout here doesn't mean the statement failed - it may still succeed moments later server-side.
-     * Every statement passed here must therefore be an idempotent "if not exists" form, since a retry after a
-     * false-negative timeout must not fail with "already exists".
+     * Executes a schema-modifying statement, retrying on {@link DriverTimeoutException} and
+     * {@link HeartbeatException}. ScyllaDB's Raft-based schema management (and, less often, Cassandra's own
+     * schema agreement) occasionally takes longer than the configured request timeout to settle a single DDL
+     * statement even though the cluster is otherwise healthy, so a bare timeout here doesn't mean the
+     * statement failed - it may still succeed moments later server-side. A heartbeat failure is the same
+     * story one layer down: the connection carrying the statement died mid-flight (observed on ScyllaDB
+     * under the load of a full-reactor IT run), which says nothing about whether the statement itself was
+     * applied. Every statement passed here must therefore be an idempotent "if not exists" form, since a
+     * retry after a false negative must not fail with "already exists".
      */
     private void executeDdlWithRetry(final String cql) {
-        DriverTimeoutException lastFailure = null;
+        RuntimeException lastFailure = null;
         for (int attempt = 1; attempt <= DDL_MAX_ATTEMPTS; attempt++) {
             try {
                 session.execute(cql);
                 return;
-            } catch (final DriverTimeoutException e) {
+            } catch (final DriverTimeoutException | HeartbeatException e) {
                 lastFailure = e;
             }
         }

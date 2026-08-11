@@ -14,16 +14,23 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+package org.apache.nifi.service.cql.api.lookup.impl;
 
-package org.apache.nifi.service.cql.api;
+import org.apache.nifi.service.cql.api.lookup.CqlCell;
+import org.apache.nifi.service.cql.api.lookup.CqlRow;
+
+import java.util.List;
+import java.util.Objects;
 
 /**
- * The type of batch statement to use when {@link CQLExecutionService} writes more than one record at a time.
- * Mirrors Cassandra's own batch semantics: {@code COUNTER} is required for counter mutations, which cannot be
- * mixed into a {@code LOGGED} or {@code UNLOGGED} batch.
+ * A {@link CqlRow} over a fixed list of cells. Every other accessor on the interface is a default derived
+ * from {@link #cells()}, so this holds the cells and nothing else.
+ *
+ * @param cells the row's cells in selection order; defensively copied, and may not be null
  */
-public enum CqlBatchType {
-    LOGGED,
-    UNLOGGED,
-    COUNTER
+public record StandardCqlRow(List<CqlCell> cells) implements CqlRow {
+
+    public StandardCqlRow {
+        cells = List.copyOf(Objects.requireNonNull(cells, "cells is required"));
+    }
 }

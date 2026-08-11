@@ -18,9 +18,10 @@
 ## Description
 
 _ScyllaDBCQLExecutionService_ is the ScyllaDB variant of `CQLExecutionService`, for use in place of
-`CassandraCQLExecutionService` by `PutCQLRecord` and `ExecuteCQLQueryRecord` when the target cluster is
-ScyllaDB rather than Apache Cassandra. In code, it is a direct subclass of `CassandraCQLExecutionService`
-that adds no properties, overrides no methods, and changes no behavior - every property, type conversion
+`CassandraCQLExecutionService` by `PutCQLRecord`, `ExecuteCQLQueryRecord` and `CQLDistributedMapCache` when
+the target cluster is ScyllaDB rather than Apache Cassandra. In code, it is a direct subclass of
+`CassandraCQLExecutionService` that adds no properties, overrides no methods, and changes no behavior -
+every property, type conversion
 rule, primary key override mechanism, table metadata lookup, and connection-verification step documented for
 `CassandraCQLExecutionService` applies here identically, including the version-1 requirement for `timeuuid`
 columns.

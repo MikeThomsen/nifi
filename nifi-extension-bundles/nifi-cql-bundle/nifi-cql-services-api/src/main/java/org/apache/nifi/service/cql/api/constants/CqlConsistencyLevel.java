@@ -15,9 +15,10 @@
  * limitations under the License.
  */
 
-package org.apache.nifi.service.cql.api;
+package org.apache.nifi.service.cql.api.constants;
 
 import org.apache.nifi.components.DescribedValue;
+import org.apache.nifi.service.cql.api.service.CQLExecutionService;
 
 /**
  * Allowable values for {@link CQLExecutionService#CONSISTENCY_LEVEL}: how many replicas must acknowledge a

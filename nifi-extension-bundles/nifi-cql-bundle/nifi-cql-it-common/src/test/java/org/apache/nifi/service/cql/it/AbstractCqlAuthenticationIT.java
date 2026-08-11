@@ -17,7 +17,7 @@
 package org.apache.nifi.service.cql.it;
 
 import org.apache.nifi.components.ConfigVerificationResult;
-import org.apache.nifi.service.cql.api.CQLExecutionService;
+import org.apache.nifi.service.cql.api.service.CQLExecutionService;
 import org.apache.nifi.util.TestRunner;
 import org.apache.nifi.util.TestRunners;
 import org.junit.jupiter.api.DisplayName;

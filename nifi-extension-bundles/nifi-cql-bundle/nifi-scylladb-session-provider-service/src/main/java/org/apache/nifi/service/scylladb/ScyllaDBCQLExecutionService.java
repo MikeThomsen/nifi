@@ -32,7 +32,7 @@ import org.apache.nifi.service.cassandra.CassandraCQLExecutionService;
  * by name in the NiFi component picker. Any subclass of a documented component has to restate them.
  */
 @Tags({"scylladb", "scylla", "cql", "cassandra", "database", "connection", "session", "pooling"})
-@CapabilityDescription("Provides a CQL connection session for CQL processors to work with ScyllaDB, using ScyllaDB's "
+@CapabilityDescription("Provides a CQL connection session for CQL processors and controller services to work with ScyllaDB, using ScyllaDB's "
         + "shard-aware driver. Use this service for ScyllaDB clusters; use CassandraCQLExecutionService for Apache "
         + "Cassandra.")
 @SeeAlso(
@@ -43,7 +43,7 @@ import org.apache.nifi.service.cassandra.CassandraCQLExecutionService;
         classNames = {
                 "org.apache.nifi.processors.cql.PutCQLRecord",
                 "org.apache.nifi.processors.cql.ExecuteCQLQueryRecord",
-                "org.apache.nifi.service.cql.CQLDistributedMapCache"
+                "org.apache.nifi.service.cql.cache.CQLDistributedMapCache"
         })
 public class ScyllaDBCQLExecutionService extends CassandraCQLExecutionService {
 }

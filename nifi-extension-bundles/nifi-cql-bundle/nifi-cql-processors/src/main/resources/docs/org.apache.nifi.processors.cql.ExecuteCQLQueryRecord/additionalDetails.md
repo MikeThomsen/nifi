@@ -160,7 +160,10 @@ Both are optional; when unset, the connection service's own configured values ap
   finish. This bounds memory/queue growth for very large result sets at the cost of releasing FlowFiles
   before the final row count is known - which is exactly why `fragment.count` is intentionally left unset
   whenever _Output Batch Size_ is configured: earlier FlowFiles may already have been committed downstream
-  before the true total could be determined.
+  before the true total could be determined. One further consequence: if the query fails after early commits
+  have already released the incoming FlowFile to `original`, that FlowFile cannot be recalled, so a new,
+  empty FlowFile is created to carry the retry signal to `retry` in its place - and the results committed
+  before the failure stay downstream, so a retried query delivers those rows a second time.
 
 If the incoming FlowFile's query returns zero rows, no output FlowFile is created at all, and the incoming
 FlowFile (if any) is routed directly to `original`.
