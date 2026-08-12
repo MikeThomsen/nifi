@@ -17,18 +17,13 @@
 
 package org.apache.nifi.service.cassandra;
 
-import com.datastax.oss.driver.api.core.CqlSession;
 import org.apache.nifi.service.cql.api.service.CQLExecutionService;
 import org.apache.nifi.service.cql.it.AbstractCqlConnectionVerificationIT;
-import org.apache.nifi.service.cql.it.CqlConnectionInfo;
-import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.TestInstance;
 import org.junit.jupiter.params.BeforeParameterizedClassInvocation;
 import org.junit.jupiter.params.Parameter;
 import org.junit.jupiter.params.ParameterizedClass;
 import org.junit.jupiter.params.provider.MethodSource;
-import org.testcontainers.cassandra.CassandraContainer;
-import org.testcontainers.junit.jupiter.Testcontainers;
 
 /**
  * Connection/{@code verify()} coverage from {@link AbstractCqlConnectionVerificationIT} run against a real
@@ -37,8 +32,11 @@ import org.testcontainers.junit.jupiter.Testcontainers;
  * since it requires a dedicated, differently-configured container per test. Runs against every supported
  * Cassandra major version when {@code -DTEST_CASSANDRA_OLDER_VERSIONS=true} is set; otherwise only the
  * current major version runs (see {@link CassandraTestVersions}).
+ *
+ * <p>The container itself belongs to {@link SharedCassandraCluster}, not to this class. Nothing here writes
+ * to a table - every test verifies a configuration - so sharing costs this suite nothing, and it reads the
+ * {@code testspace} keyspace {@code init.cql} creates at container start.
  */
-@Testcontainers
 @ParameterizedClass
 @MethodSource("org.apache.nifi.service.cassandra.CassandraTestVersions#allVersions")
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
@@ -46,41 +44,18 @@ class CassandraConnectionVerificationIT extends AbstractCqlConnectionVerificatio
 
     private static final String KEYSPACE = "testspace";
 
-    private static final String LOCAL_DATACENTER = "datacenter1";
-
     // A @ParameterizedClass combined with @TestInstance(PER_CLASS) requires field injection rather than
     // constructor injection, so this field is what JUnit populates per invocation (per version value).
     @Parameter
     private String version;
-
-    private CassandraContainer container;
-
-    private CqlSession session;
 
     // Runs once per invocation of this parameterized class (once per version value), before any @Test
     // methods. Also responsible for calling initializeConnectionInfo() directly (rather than relying on an
     // inherited @BeforeAll) since @BeforeAll - even inherited from AbstractCqlConnectionVerificationIT -
     // runs BEFORE this method on a @ParameterizedClass leaf, not after.
     @BeforeParameterizedClassInvocation
-    void startContainer(final String version) {
-        container = new CassandraContainer("cassandra:" + version)
-                .withInitScript("init.cql");
-        container.withExposedPorts(9042);
-        container.start();
-
-        final String contactPoint = container.getContainerIpAddress() + ":" + container.getMappedPort(9042);
-        session = CqlSession.builder()
-                .addContactPoint(container.getContactPoint())
-                .withLocalDatacenter(LOCAL_DATACENTER)
-                .build();
-
-        initializeConnectionInfo(new CqlConnectionInfo(contactPoint, LOCAL_DATACENTER, KEYSPACE, session));
-    }
-
-    @AfterAll
-    void tearDown() {
-        session.close();
-        container.stop();
+    void attachToCluster(final String version) {
+        initializeConnectionInfo(SharedCassandraCluster.forVersion(version).connectionInfo(KEYSPACE));
     }
 
     @Override

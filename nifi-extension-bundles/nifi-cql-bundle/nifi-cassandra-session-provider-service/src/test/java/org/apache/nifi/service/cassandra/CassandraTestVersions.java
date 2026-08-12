@@ -29,12 +29,20 @@ final class CassandraTestVersions {
 
     private static final String RUN_OLDER_VERSIONS_PROPERTY = "TEST_CASSANDRA_OLDER_VERSIONS";
 
+    /**
+     * The current major version, and the only one exercised unless {@code TEST_CASSANDRA_OLDER_VERSIONS} is
+     * set. Suites whose behaviour does not vary by release pin to this rather than declaring a version of
+     * their own, so that they share {@code SharedCassandraCluster}'s container for it instead of silently
+     * starting a second one the day this is bumped.
+     */
+    static final String CURRENT_VERSION = "5.0";
+
     private CassandraTestVersions() {
     }
 
     static Stream<String> allVersions() {
         return Boolean.getBoolean(RUN_OLDER_VERSIONS_PROPERTY)
-                ? Stream.of("3.11", "4.1", "5.0")
-                : Stream.of("5.0");
+                ? Stream.of("3.11", "4.1", CURRENT_VERSION)
+                : Stream.of(CURRENT_VERSION);
     }
 }

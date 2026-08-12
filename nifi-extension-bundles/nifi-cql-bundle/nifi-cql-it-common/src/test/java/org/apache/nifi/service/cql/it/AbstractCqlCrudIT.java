@@ -88,6 +88,8 @@ public abstract class AbstractCqlCrudIT {
 
     private CqlConnectionInfo connectionInfo;
 
+    private String kvTableName;
+
     /**
      * @return a fresh, unconfigured instance of the backend implementation under test
      */
@@ -494,10 +496,21 @@ public abstract class AbstractCqlCrudIT {
     // These are the paths query() cannot express: a statement-level outcome, and values read without a
     // schema imposed on them. Both matter for a caller doing compare-and-set over opaque bytes.
 
+    /**
+     * The table the {@code execute()} tests below share, created on first use.
+     *
+     * <p>Created once rather than per test, and through the retrying helper rather than the raw session:
+     * every other DDL statement in this suite already goes through {@link CqlDdl}, and this one issuing six
+     * unretried {@code create table} statements against a node whose schema is busy settling is exactly the
+     * false-negative timeout that helper exists to absorb.
+     */
     private String kvTable() {
-        session.execute("create table if not exists " + connectionInfo.keyspace()
-                + ".execute_kv (k blob primary key, v blob)");
-        return connectionInfo.keyspace() + ".execute_kv";
+        if (kvTableName == null) {
+            final String table = connectionInfo.keyspace() + ".execute_kv";
+            CqlDdl.executeWithRetry(session, "create table if not exists " + table + " (k blob primary key, v blob)");
+            kvTableName = table;
+        }
+        return kvTableName;
     }
 
     private static ByteBuffer bytes(final String value) {

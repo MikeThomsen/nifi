@@ -17,67 +17,31 @@
 
 package org.apache.nifi.service.scylladb;
 
-import com.datastax.oss.driver.api.core.CqlSession;
-import com.datastax.oss.driver.api.core.config.DriverConfigLoader;
 import org.apache.nifi.service.cql.api.service.CQLExecutionService;
 import org.apache.nifi.service.cql.it.AbstractCqlRecordFieldTypeIT;
-import org.apache.nifi.service.cql.it.CqlConnectionInfo;
-import org.apache.nifi.service.cql.it.CqlDdl;
-import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.TestInstance;
-import org.testcontainers.junit.jupiter.Testcontainers;
-import org.testcontainers.scylladb.ScyllaDBContainer;
 
 /**
  * Type-coverage tests from {@link AbstractCqlRecordFieldTypeIT} run against a real ScyllaDB container.
  * Single fixed image version, not parameterized - see {@link ScyllaCrudIT}'s javadoc for why.
+ *
+ * <p>The container itself belongs to {@link SharedScyllaCluster}, not to this class. It owns the
+ * {@code type_coverage} keyspace, in which it creates a table per type under test - a rapid sequence of
+ * roughly 40 schema-modifying statements, which is why the shared session is configured with
+ * {@link ScyllaDdlTimeouts}' raised ceilings and every statement goes through the retrying DDL helper.
  */
-@Testcontainers
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 class ScyllaRecordFieldTypeIT extends AbstractCqlRecordFieldTypeIT {
 
-    private static final String IMAGE = "scylladb/scylla:2026.2";
-
     private static final String KEYSPACE = "type_coverage";
 
-    private static final String LOCAL_DATACENTER = "datacenter1";
-
-    private ScyllaDBContainer container;
-
-    private CqlSession session;
-
     @BeforeAll
-    void startContainer() throws Exception {
-        container = new ScyllaDBContainer(IMAGE);
-        container.withExposedPorts(9042);
-        container.start();
+    void attachToCluster() throws Exception {
+        final SharedScyllaCluster cluster = SharedScyllaCluster.getInstance();
+        cluster.createKeyspace(KEYSPACE);
 
-        // This class issues a rapid sequence of schema-modifying DDL (a "create table" or "create type" per
-        // test, ~40 statements total), which is slower to settle than plain reads/writes - the driver's
-        // built-in 2 second defaults for both request timeouts and internal schema-refresh/agreement queries
-        // (issued automatically after every DDL statement) aren't enough here, unlike sessionProvider's own
-        // 30 second default (CQLExecutionService.READ_TIMEOUT), so this bootstrap session needs its own
-        // longer timeouts across the board (see ScyllaDdlTimeouts, shared with ScyllaAuthenticationIT, which
-        // hits the exact same issue).
-        final DriverConfigLoader longTimeoutConfig = ScyllaDdlTimeouts.longSchemaTimeoutConfigLoader();
-        session = CqlSession.builder()
-                .addContactPoint(container.getContactPoint())
-                .withLocalDatacenter(LOCAL_DATACENTER)
-                .withConfigLoader(longTimeoutConfig)
-                .build();
-        CqlDdl.executeWithRetry(session,
-                "create keyspace if not exists " + KEYSPACE + " with replication = { 'class': 'NetworkTopologyStrategy', '" + LOCAL_DATACENTER + "': 1};");
-
-        final String contactPoint = container.getContainerIpAddress() + ":" + container.getMappedPort(9042);
-
-        initializeSessionProvider(new CqlConnectionInfo(contactPoint, LOCAL_DATACENTER, KEYSPACE, session));
-    }
-
-    @AfterAll
-    void tearDown() {
-        session.close();
-        container.stop();
+        initializeSessionProvider(cluster.connectionInfo(KEYSPACE));
     }
 
     @Override

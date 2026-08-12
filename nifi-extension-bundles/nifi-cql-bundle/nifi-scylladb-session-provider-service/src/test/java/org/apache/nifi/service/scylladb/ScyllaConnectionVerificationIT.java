@@ -17,59 +17,32 @@
 
 package org.apache.nifi.service.scylladb;
 
-import com.datastax.oss.driver.api.core.CqlSession;
 import org.apache.nifi.service.cql.api.service.CQLExecutionService;
 import org.apache.nifi.service.cql.it.AbstractCqlConnectionVerificationIT;
-import org.apache.nifi.service.cql.it.CqlConnectionInfo;
-import org.apache.nifi.service.cql.it.CqlDdl;
-import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.TestInstance;
-import org.testcontainers.junit.jupiter.Testcontainers;
-import org.testcontainers.scylladb.ScyllaDBContainer;
 
 /**
  * Connection/{@code verify()} coverage from {@link AbstractCqlConnectionVerificationIT} run against a real
  * ScyllaDB container. Single fixed image version, not parameterized - see {@link ScyllaCrudIT}'s javadoc for
- * why. Uses {@link ScyllaDdlTimeouts} for the same reason as {@link ScyllaRecordFieldTypeIT}.
+ * why.
+ *
+ * <p>The container itself belongs to {@link SharedScyllaCluster}, not to this class. Nothing here writes to a
+ * table - every test verifies a configuration - so sharing costs this suite nothing; it needs only the
+ * {@code testspace} keyspace to exist for {@code verify()}'s keyspace check, which it creates idempotently
+ * rather than relying on {@link ScyllaCrudIT} having run first.
  */
-@Testcontainers
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 class ScyllaConnectionVerificationIT extends AbstractCqlConnectionVerificationIT {
 
-    private static final String IMAGE = "scylladb/scylla:2026.2";
-
     private static final String KEYSPACE = "testspace";
 
-    private static final String LOCAL_DATACENTER = "datacenter1";
-
-    private ScyllaDBContainer container;
-
-    private CqlSession session;
-
     @BeforeAll
-    void startContainer() {
-        container = new ScyllaDBContainer(IMAGE);
-        container.withExposedPorts(9042);
-        container.start();
+    void attachToCluster() {
+        final SharedScyllaCluster cluster = SharedScyllaCluster.getInstance();
+        cluster.createKeyspace(KEYSPACE);
 
-        final String contactPoint = container.getContainerIpAddress() + ":" + container.getMappedPort(9042);
-        session = CqlSession.builder()
-                .addContactPoint(container.getContactPoint())
-                .withLocalDatacenter(LOCAL_DATACENTER)
-                .withConfigLoader(ScyllaDdlTimeouts.longSchemaTimeoutConfigLoader())
-                .build();
-
-        CqlDdl.executeWithRetry(session,
-                "create keyspace if not exists " + KEYSPACE + " with replication = { 'class': 'NetworkTopologyStrategy', '" + LOCAL_DATACENTER + "': 1};");
-
-        initializeConnectionInfo(new CqlConnectionInfo(contactPoint, LOCAL_DATACENTER, KEYSPACE, session));
-    }
-
-    @AfterAll
-    void tearDown() {
-        session.close();
-        container.stop();
+        initializeConnectionInfo(cluster.connectionInfo(KEYSPACE));
     }
 
     @Override

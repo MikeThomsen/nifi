@@ -17,57 +17,33 @@
 
 package org.apache.nifi.service.cassandra;
 
-import com.datastax.oss.driver.api.core.CqlSession;
 import org.apache.nifi.service.cql.api.service.CQLExecutionService;
 import org.apache.nifi.service.cql.it.AbstractCqlRecordFieldTypeIT;
-import org.apache.nifi.service.cql.it.CqlConnectionInfo;
-import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.TestInstance;
-import org.testcontainers.cassandra.CassandraContainer;
-import org.testcontainers.junit.jupiter.Testcontainers;
 
 /**
  * Type-coverage tests from {@link AbstractCqlRecordFieldTypeIT} run against a real Cassandra container.
- * Single fixed image version rather than a parameterized matrix, since the behavior under test (record
- * field type <-> CQL type conversion) doesn't vary across Cassandra major versions the way connection/auth
+ * Single fixed version rather than a parameterized matrix, since the behavior under test (record field type
+ * &lt;-&gt; CQL type conversion) doesn't vary across Cassandra major versions the way connection/auth
  * handling can.
+ *
+ * <p>The container itself belongs to {@link SharedCassandraCluster}, not to this class: pinning to
+ * {@link SharedCassandraCluster#PINNED_VERSION} means this suite lands on the same instance the
+ * version-parameterized suites use for that version rather than starting one of its own. It owns the
+ * {@code type_coverage} keyspace, in which it creates a table per type under test.
  */
-@Testcontainers
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 class CassandraRecordFieldTypeIT extends AbstractCqlRecordFieldTypeIT {
 
-    private static final String CASSANDRA_IMAGE = "cassandra:5.0";
-
     private static final String KEYSPACE = "type_coverage";
 
-    private static final String DATACENTER = "datacenter1";
-
-    private CassandraContainer container;
-
-    private CqlSession session;
-
     @BeforeAll
-    void startContainer() throws Exception {
-        container = new CassandraContainer(CASSANDRA_IMAGE);
-        container.withExposedPorts(9042);
-        container.start();
+    void attachToCluster() throws Exception {
+        final SharedCassandraCluster cluster = SharedCassandraCluster.forVersion(SharedCassandraCluster.PINNED_VERSION);
+        cluster.createKeyspace(KEYSPACE);
 
-        session = CqlSession.builder()
-                .addContactPoint(container.getContactPoint())
-                .withLocalDatacenter(DATACENTER)
-                .build();
-        session.execute("create keyspace " + KEYSPACE + " with replication = {'class': 'SimpleStrategy', 'replication_factor': 1}");
-
-        final String contactPoint = container.getContainerIpAddress() + ":" + container.getMappedPort(9042);
-
-        initializeSessionProvider(new CqlConnectionInfo(contactPoint, DATACENTER, KEYSPACE, session));
-    }
-
-    @AfterAll
-    void tearDown() {
-        session.close();
-        container.stop();
+        initializeSessionProvider(cluster.connectionInfo(KEYSPACE));
     }
 
     @Override

@@ -17,58 +17,34 @@
 
 package org.apache.nifi.service.cassandra;
 
-import com.datastax.oss.driver.api.core.CqlSession;
 import org.apache.nifi.service.cql.api.service.CQLExecutionService;
 import org.apache.nifi.service.cql.it.AbstractCqlPrimaryKeyOverrideIT;
-import org.apache.nifi.service.cql.it.CqlConnectionInfo;
-import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.TestInstance;
-import org.testcontainers.cassandra.CassandraContainer;
-import org.testcontainers.junit.jupiter.Testcontainers;
 
 /**
  * Primary key RecordPath override coverage from {@link AbstractCqlPrimaryKeyOverrideIT} run against a real
- * Cassandra container. Single fixed image version, not parameterized across Cassandra major versions - see
+ * Cassandra container. Single fixed version, not parameterized across Cassandra major versions - see
  * {@link CassandraRecordFieldTypeIT}'s javadoc for why (this test exercises the same kind of
  * version-independent behavior: statement generation and codec-driven type coercion, not anything that
  * varies release to release).
+ *
+ * <p>The container itself belongs to {@link SharedCassandraCluster}, not to this class: pinning to
+ * {@link SharedCassandraCluster#PINNED_VERSION} means this suite lands on the same instance the
+ * version-parameterized suites use for that version rather than starting one of its own. It owns the
+ * {@code pk_override} keyspace, in which the shared superclass creates its three tables.
  */
-@Testcontainers
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 class CassandraPrimaryKeyOverrideIT extends AbstractCqlPrimaryKeyOverrideIT {
 
-    private static final String CASSANDRA_IMAGE = "cassandra:5.0";
-
     private static final String KEYSPACE = "pk_override";
 
-    private static final String DATACENTER = "datacenter1";
-
-    private CassandraContainer container;
-
-    private CqlSession session;
-
     @BeforeAll
-    void startContainer() throws Exception {
-        container = new CassandraContainer(CASSANDRA_IMAGE);
-        container.withExposedPorts(9042);
-        container.start();
+    void attachToCluster() throws Exception {
+        final SharedCassandraCluster cluster = SharedCassandraCluster.forVersion(SharedCassandraCluster.PINNED_VERSION);
+        cluster.createKeyspace(KEYSPACE);
 
-        session = CqlSession.builder()
-                .addContactPoint(container.getContactPoint())
-                .withLocalDatacenter(DATACENTER)
-                .build();
-        session.execute("create keyspace " + KEYSPACE + " with replication = {'class': 'SimpleStrategy', 'replication_factor': 1}");
-
-        final String contactPoint = container.getContainerIpAddress() + ":" + container.getMappedPort(9042);
-
-        initializeSessionProvider(new CqlConnectionInfo(contactPoint, DATACENTER, KEYSPACE, session));
-    }
-
-    @AfterAll
-    void tearDown() {
-        session.close();
-        container.stop();
+        initializeSessionProvider(cluster.connectionInfo(KEYSPACE));
     }
 
     @Override

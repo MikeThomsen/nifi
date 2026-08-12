@@ -20,50 +20,32 @@ package org.apache.nifi.service.scylladb;
 import com.datastax.oss.driver.api.core.CqlSession;
 import org.apache.nifi.service.cql.api.service.CQLExecutionService;
 import org.apache.nifi.service.cql.it.AbstractCqlCrudIT;
-import org.apache.nifi.service.cql.it.CqlConnectionInfo;
 import org.apache.nifi.service.cql.it.CqlDdl;
-import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.TestInstance;
-import org.testcontainers.junit.jupiter.Testcontainers;
-import org.testcontainers.scylladb.ScyllaDBContainer;
 
 /**
  * CRUD coverage from {@link AbstractCqlCrudIT} run against a real ScyllaDB container. Unlike the Cassandra
- * side, this runs against a single, fixed image version rather than a parameterized matrix - see the
- * refactoring plan for why. Schema bootstrap uses inline {@code session.execute()} calls rather than
- * {@code withInitScript}, since {@link ScyllaDBContainer} (a plain {@code GenericContainer} subclass) has no
- * equivalent hook. Uses {@link ScyllaDdlTimeouts} for the same reason as {@link ScyllaRecordFieldTypeIT}.
+ * side, this runs against a single, fixed image version rather than a parameterized matrix.
+ *
+ * <p>The container itself belongs to {@link SharedScyllaCluster}, not to this class - see there for what
+ * sharing one costs and requires. Schema bootstrap stays here rather than moving into the shared holder,
+ * because these tables belong to this suite: {@link ScyllaConnectionVerificationIT} shares the
+ * {@code testspace} keyspace but never touches a table in it. The statements are idempotent, since which
+ * suite reaches the shared container first is not fixed. They are issued inline rather than through an init
+ * script because ScyllaDB's Testcontainers image has no {@code withInitScript} equivalent.
  */
-@Testcontainers
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 class ScyllaCrudIT extends AbstractCqlCrudIT {
 
-    private static final String IMAGE = "scylladb/scylla:2026.2";
-
     private static final String KEYSPACE = "testspace";
 
-    private static final String LOCAL_DATACENTER = "datacenter1";
-
-    private ScyllaDBContainer container;
-
-    private CqlSession session;
-
     @BeforeAll
-    void startContainer() throws Exception {
-        container = new ScyllaDBContainer(IMAGE);
-        container.withExposedPorts(9042);
-        container.start();
+    void attachToCluster() throws Exception {
+        final SharedScyllaCluster cluster = SharedScyllaCluster.getInstance();
+        cluster.createKeyspace(KEYSPACE);
 
-        final String contactPoint = container.getContainerIpAddress() + ":" + container.getMappedPort(9042);
-        session = CqlSession.builder()
-                .addContactPoint(container.getContactPoint())
-                .withLocalDatacenter(LOCAL_DATACENTER)
-                .withConfigLoader(ScyllaDdlTimeouts.longSchemaTimeoutConfigLoader())
-                .build();
-
-        CqlDdl.executeWithRetry(session,
-                "create keyspace if not exists " + KEYSPACE + " with replication = { 'class': 'NetworkTopologyStrategy', '" + LOCAL_DATACENTER + "': 1};");
+        final CqlSession session = cluster.session();
         CqlDdl.executeWithRetry(session, """
                 create table if not exists testspace.message
                 (
@@ -99,13 +81,7 @@ class ScyllaCrudIT extends AbstractCqlCrudIT {
                     primary key ( username )
                 );""");
 
-        initializeSessionProvider(new CqlConnectionInfo(contactPoint, LOCAL_DATACENTER, KEYSPACE, session));
-    }
-
-    @AfterAll
-    void tearDown() {
-        session.close();
-        container.stop();
+        initializeSessionProvider(cluster.connectionInfo(KEYSPACE));
     }
 
     @Override
