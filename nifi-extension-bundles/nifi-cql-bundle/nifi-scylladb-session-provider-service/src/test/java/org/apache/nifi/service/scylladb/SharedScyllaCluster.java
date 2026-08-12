@@ -20,10 +20,7 @@ package org.apache.nifi.service.scylladb;
 import com.datastax.oss.driver.api.core.CqlSession;
 import org.apache.nifi.service.cql.it.CqlConnectionInfo;
 import org.apache.nifi.service.cql.it.CqlDdl;
-import org.apache.nifi.service.cql.it.DockerUtils;
 import org.testcontainers.scylladb.ScyllaDBContainer;
-
-import java.util.Map;
 
 /**
  * The single ScyllaDB container shared by every IT in this package that only needs a plain,
@@ -85,17 +82,7 @@ final class SharedScyllaCluster {
     }
 
     private static SharedScyllaCluster start() {
-        final ScyllaDBContainer container = new ScyllaDBContainer(IMAGE)
-                // mode=1777 is required: the tmpfs masks the image's scylla-owned /var/lib/scylla, and Docker
-                // mounts it root-owned 0755 by default, so the container's non-root scylla user cannot create
-                // the data directory and the entrypoint dies before Scylla ever starts.
-                .withTmpFs(Map.of("/var/lib/scylla", "rw,size=512m,mode=1777"))
-                // --reserve-memory is what makes the 2 GB cap below workable: Seastar otherwise holds back
-                // ~1.5 GB of the cgroup limit for the OS, decides only ~500 MB is left, and refuses to start
-                // with the 750M asked for here.
-                .withCommand("--smp", "1", "--memory", "750M", "--reserve-memory", "256M",
-                        "--developer-mode", "1", "--overprovisioned", "1")
-                .withCreateContainerCmdModifier(DockerUtils.createMemoryLimits(2L, 2));
+        final ScyllaDBContainer container = ScyllaContainerLimits.apply(new ScyllaDBContainer(IMAGE));
         container.withExposedPorts(CQL_PORT);
         container.start();
 

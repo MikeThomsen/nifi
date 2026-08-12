@@ -67,10 +67,16 @@
             <artifactId>nifi-ssl-context-service</artifactId>
             <version>2.12.0-SNAPSHOT</version>
         </dependency>
+        <!--
+            DockerUtils compiles against docker-java's CreateContainerCmd, which arrives transitively
+            through Testcontainers. Depending on Testcontainers rather than docker-java directly keeps
+            the docker-java version tied to ${testcontainers.version}, so the class cannot end up
+            compiled against one version and run against another after a Testcontainers upgrade.
+        -->
         <dependency>
-            <groupId>com.github.docker-java</groupId>
-            <artifactId>docker-java-api</artifactId>
-            <version>3.7.1</version>
+            <groupId>org.testcontainers</groupId>
+            <artifactId>testcontainers</artifactId>
+            <version>${testcontainers.version}</version>
             <scope>test</scope>
         </dependency>
     </dependencies>

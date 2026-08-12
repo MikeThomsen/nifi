@@ -81,7 +81,7 @@ class ScyllaAuthenticationIT extends AbstractCqlAuthenticationIT {
 
     @BeforeAll
     void startContainerAndCreateRole() throws Exception {
-        container = new ScyllaDBContainer(IMAGE)
+        container = ScyllaContainerLimits.apply(new ScyllaDBContainer(IMAGE))
                 .withCopyFileToContainer(MountableFile.forHostPath(buildAuthYaml()), SCYLLA_YAML_CONTAINER_PATH);
         container.withExposedPorts(9042);
         container.start();

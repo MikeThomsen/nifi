@@ -20,6 +20,7 @@ package org.apache.nifi.service.cassandra;
 import com.datastax.oss.driver.api.core.CqlSession;
 import org.apache.nifi.service.cql.api.service.CQLExecutionService;
 import org.apache.nifi.service.cql.it.AbstractCqlAuthenticationIT;
+import org.apache.nifi.service.cql.it.DockerUtils;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.TestInstance;
 import org.junit.jupiter.params.BeforeParameterizedClassInvocation;
@@ -79,7 +80,8 @@ class CassandraAuthenticationIT extends AbstractCqlAuthenticationIT {
         // A dedicated container per invocation: enabling PasswordAuthenticator is a server-side config
         // change (cassandra.yaml authenticator), so it can't be toggled on an already-running container.
         container = new CassandraContainer("cassandra:" + version)
-                .withInitScript("init.cql");
+                .withInitScript("init.cql")
+                .withCreateContainerCmdModifier(DockerUtils.createMemoryLimits(2L, 2));
         if (CASSANDRA_5_VERSION.equals(version)) {
             container.withCopyFileToContainer(
                     MountableFile.forHostPath(CassandraConfigOverrides.writePatchedConfig(config ->

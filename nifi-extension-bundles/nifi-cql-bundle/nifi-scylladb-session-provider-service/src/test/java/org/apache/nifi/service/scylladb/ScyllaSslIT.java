@@ -103,7 +103,7 @@ class ScyllaSslIT extends AbstractCqlSslIT {
 
         final Path serverYaml = buildServerYaml(targetDirectory, requireClientAuth);
 
-        final ScyllaDBContainer container = new ScyllaDBContainer(IMAGE)
+        final ScyllaDBContainer container = ScyllaContainerLimits.apply(new ScyllaDBContainer(IMAGE))
                 .withCopyFileToContainer(MountableFile.forHostPath(serverYaml), SCYLLA_YAML_CONTAINER_PATH)
                 .withCopyFileToContainer(MountableFile.forHostPath(serverCertPem), SERVER_CERT_CONTAINER_PATH)
                 .withCopyFileToContainer(MountableFile.forHostPath(serverKeyPem), SERVER_KEY_CONTAINER_PATH);
