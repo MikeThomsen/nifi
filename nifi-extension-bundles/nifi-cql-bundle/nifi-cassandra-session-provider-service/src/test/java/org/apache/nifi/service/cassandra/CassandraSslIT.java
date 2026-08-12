@@ -19,6 +19,7 @@ package org.apache.nifi.service.cassandra;
 
 import org.apache.nifi.service.cql.api.service.CQLExecutionService;
 import org.apache.nifi.service.cql.it.AbstractCqlSslIT;
+import org.apache.nifi.service.cql.it.DockerUtils;
 import org.junit.jupiter.api.TestInstance;
 import org.testcontainers.cassandra.CassandraContainer;
 import org.testcontainers.junit.jupiter.Testcontainers;
@@ -77,7 +78,8 @@ class CassandraSslIT extends AbstractCqlSslIT {
                 .withCopyFileToContainer(MountableFile.forHostPath(writeSslPatchedConfig(requireClientAuth, serverKeyStore, serverTrustStore)),
                         CassandraConfigOverrides.CONTAINER_CASSANDRA_YAML_PATH)
                 .withCopyFileToContainer(MountableFile.forHostPath(serverKeyStore.path()), CASSANDRA_KEYSTORE_CONTAINER_PATH)
-                .withInitScript("init.cql");
+                .withInitScript("init.cql")
+                .withCreateContainerCmdModifier(DockerUtils.createMemoryLimits(2L, 2));
 
         if (serverTrustStore != null) {
             container.withCopyFileToContainer(MountableFile.forHostPath(serverTrustStore.path()), CASSANDRA_TRUSTSTORE_CONTAINER_PATH);

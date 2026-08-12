@@ -20,6 +20,7 @@ package org.apache.nifi.service.cassandra;
 import com.datastax.oss.driver.api.core.CqlSession;
 import org.apache.nifi.service.cql.it.CqlConnectionInfo;
 import org.apache.nifi.service.cql.it.CqlDdl;
+import org.apache.nifi.service.cql.it.DockerUtils;
 import org.testcontainers.cassandra.CassandraContainer;
 
 import java.util.HashMap;
@@ -95,6 +96,8 @@ final class SharedCassandraCluster {
         // init.cql creates the "testspace" keyspace and its tables, which the CRUD and connection
         // verification suites both expect to exist before their first test.
         final CassandraContainer container = new CassandraContainer("cassandra:" + version)
+                .withTmpFs(Map.of("/var/lib/cassandra", "rw,size=1g"))
+                .withCreateContainerCmdModifier(DockerUtils.createMemoryLimits(2L, 2))
                 .withInitScript("init.cql");
         container.withExposedPorts(CQL_PORT);
         container.start();
