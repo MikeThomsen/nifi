@@ -20,6 +20,7 @@ package org.apache.nifi.service.scylladb;
 import com.datastax.oss.driver.api.core.CqlSession;
 import org.apache.nifi.service.cql.api.service.CQLExecutionService;
 import org.apache.nifi.service.cql.it.AbstractCqlSslIT;
+import org.apache.nifi.service.cql.it.CqlDdl;
 import org.junit.jupiter.api.TestInstance;
 import org.testcontainers.junit.jupiter.Testcontainers;
 import org.testcontainers.scylladb.ScyllaDBContainer;
@@ -139,7 +140,7 @@ class ScyllaSslIT extends AbstractCqlSslIT {
                 .withSslContext(sslContext)
                 .withConfigLoader(ScyllaDdlTimeouts.longSchemaTimeoutConfigLoader())
                 .build()) {
-            ScyllaDdlTimeouts.executeDdlWithRetry(bootstrapSession, "create keyspace if not exists " + KEYSPACE
+            CqlDdl.executeWithRetry(bootstrapSession, "create keyspace if not exists " + KEYSPACE
                     + " with replication = { 'class': 'NetworkTopologyStrategy', '" + LOCAL_DATACENTER + "': 1};");
         }
     }

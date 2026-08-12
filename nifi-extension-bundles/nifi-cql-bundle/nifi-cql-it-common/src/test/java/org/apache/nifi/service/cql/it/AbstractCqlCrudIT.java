@@ -36,8 +36,6 @@ import org.apache.nifi.service.cql.api.metadata.PrimaryKey;
 import org.apache.nifi.service.cql.api.constants.PrimaryKeyFieldType;
 import org.apache.nifi.service.cql.api.metadata.PrimaryKeyMetadata;
 import org.apache.nifi.service.cql.api.metadata.QualifiedTableName;
-import org.apache.nifi.util.TestRunner;
-import org.apache.nifi.util.TestRunners;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInstance;
@@ -98,14 +96,9 @@ public abstract class AbstractCqlCrudIT {
     protected void initializeSessionProvider(final CqlConnectionInfo connectionInfo) throws Exception {
         this.connectionInfo = connectionInfo;
         this.session = connectionInfo.session();
-        this.sessionProvider = newSessionProvider();
-
-        final TestRunner runner = TestRunners.newTestRunner(new MockCqlProcessor());
-        runner.addControllerService("cql-session-provider", sessionProvider);
-        runner.setProperty(sessionProvider, CQLExecutionService.CONTACT_POINTS, connectionInfo.contactPoint());
-        runner.setProperty(sessionProvider, CQLExecutionService.DATACENTER, connectionInfo.datacenter());
-        runner.setProperty(sessionProvider, CQLExecutionService.KEYSPACE, connectionInfo.keyspace());
-        runner.enableControllerService(sessionProvider);
+        this.sessionProvider = CqlServiceRunner.forService(newSessionProvider())
+                .withConnection(connectionInfo)
+                .enable();
     }
 
     private RecordSchema getMessageSchema() {
@@ -452,14 +445,10 @@ public abstract class AbstractCqlCrudIT {
         // throws UnavailableException (a QueryExecutionException) synchronously from the very first
         // execute() call, before any rows are fetched - exactly the code path that used to bypass the
         // QueryFailureException translation.
-        final CQLExecutionService unsatisfiableConsistencyProvider = newSessionProvider();
-        final TestRunner runner = TestRunners.newTestRunner(new MockCqlProcessor());
-        runner.addControllerService("cql-session-provider", unsatisfiableConsistencyProvider);
-        runner.setProperty(unsatisfiableConsistencyProvider, CQLExecutionService.CONTACT_POINTS, connectionInfo.contactPoint());
-        runner.setProperty(unsatisfiableConsistencyProvider, CQLExecutionService.DATACENTER, connectionInfo.datacenter());
-        runner.setProperty(unsatisfiableConsistencyProvider, CQLExecutionService.KEYSPACE, connectionInfo.keyspace());
-        runner.setProperty(unsatisfiableConsistencyProvider, CQLExecutionService.CONSISTENCY_LEVEL, "THREE");
-        runner.enableControllerService(unsatisfiableConsistencyProvider);
+        final CQLExecutionService unsatisfiableConsistencyProvider = CqlServiceRunner.forService(newSessionProvider())
+                .withConnection(connectionInfo)
+                .withProperty(CQLExecutionService.CONSISTENCY_LEVEL, "THREE")
+                .enable();
 
         final CollectingCqlQueryCallback callback = new CollectingCqlQueryCallback();
 

@@ -270,11 +270,14 @@ public class ExecuteCQLQueryRecordTest {
     @DisplayName("Verify that a record writer failing mid-result-set routes to failure with no FlowFile left stranded")
     public void testWriterFailureMidResultSetRoutesToFailure() throws Exception {
         // failAfterN counts per writer instance and the callback builds a fresh writer per FlowFile, so this
-        // only reaches the failure with a single writer covering the whole result set.
+        // only reaches the failure with a single writer covering the whole result set - hence 0 (unlimited)
+        // rows per FlowFile. The writer throws at row 5, before the query's own failure at row 9 would have
+        // fired, so this is the writer-failure path rather than the query-failure one.
         runWithMidStreamFailure(9, 0, 0, new MockRecordWriter(null, false, 5));
 
         testRunner.assertTransferCount(ExecuteCQLQueryRecord.REL_FAILURE, 1);
         testRunner.assertTransferCount(ExecuteCQLQueryRecord.REL_SUCCESS, 0);
+        testRunner.assertTransferCount(ExecuteCQLQueryRecord.REL_ORIGINAL, 0);
         testRunner.assertTransferCount(ExecuteCQLQueryRecord.REL_RETRY, 0);
     }
 
@@ -385,42 +388,6 @@ public class ExecuteCQLQueryRecordTest {
         testRunner.assertTransferCount(ExecuteCQLQueryRecord.REL_ORIGINAL, 1);
         testRunner.assertTransferCount(ExecuteCQLQueryRecord.REL_SUCCESS, 0);
         testRunner.assertTransferCount(ExecuteCQLQueryRecord.REL_FAILURE, 0);
-        testRunner.assertTransferCount(ExecuteCQLQueryRecord.REL_RETRY, 0);
-    }
-
-    @Test
-    @DisplayName("Verify that a mid-stream write failure routes to failure without leaking the in-progress FlowFile")
-    public void testWriteFailureRoutesToFailureWithoutLeakingFlowFiles() throws Exception {
-        testRunner.setProperty(ExecuteCQLQueryRecord.MAX_ROWS_PER_FLOW_FILE, "100");
-
-        // MockRecordWriter's failAfterN throws an IOException once N records have been written, simulating a
-        // downstream serialization failure partway through a FlowFile.
-        MockRecordWriter parser = new MockRecordWriter(null, true, 2);
-
-        RecordField field1 = new RecordField("a", RecordFieldType.STRING.getDataType());
-        SimpleRecordSchema schema = new SimpleRecordSchema(List.of(field1));
-
-        List<Record> data = new ArrayList<>();
-        for (int i = 0; i < 5; i++) {
-            data.add(new MapRecord(schema, Map.of("a", "value" + i)));
-        }
-
-        MockCQLQueryExecutionService service = new MockCQLQueryExecutionService(data.iterator());
-
-        testRunner.setProperty(ExecuteCQLQueryRecord.CONNECTION_PROVIDER_SERVICE, "connection");
-        testRunner.addControllerService("connection", service);
-        testRunner.enableControllerService(service);
-        testRunner.setProperty(ExecuteCQLQueryRecord.OUTPUT_WRITER, "writer");
-        testRunner.addControllerService("writer", parser);
-        testRunner.enableControllerService(parser);
-        testRunner.assertValid();
-
-        testRunner.enqueue("parent_file");
-        testRunner.run();
-
-        testRunner.assertTransferCount(ExecuteCQLQueryRecord.REL_FAILURE, 1);
-        testRunner.assertTransferCount(ExecuteCQLQueryRecord.REL_SUCCESS, 0);
-        testRunner.assertTransferCount(ExecuteCQLQueryRecord.REL_ORIGINAL, 0);
         testRunner.assertTransferCount(ExecuteCQLQueryRecord.REL_RETRY, 0);
     }
 

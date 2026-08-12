@@ -17,20 +17,22 @@
 
 package org.apache.nifi.service.scylladb;
 
-import com.datastax.oss.driver.api.core.CqlSession;
-import com.datastax.oss.driver.api.core.DriverTimeoutException;
 import com.datastax.oss.driver.api.core.config.DefaultDriverOption;
 import com.datastax.oss.driver.api.core.config.DriverConfigLoader;
 
 import java.time.Duration;
 
 /**
- * Shared request/schema-agreement timeout config, and retry-on-timeout DDL execution, for bootstrap sessions
- * that issue DDL against a real ScyllaDB container (every IT class in this package that creates a keyspace,
- * table, type, or role directly). Schema-modifying statements settle through ScyllaDB's Raft-based schema
- * management (group0), which the driver's 2 second defaults for request and internal schema-refresh/agreement
- * timeouts aren't reliably enough for, and which can occasionally exceed even a generous timeout under host
- * contention - hence the retry on top of the raised ceiling.
+ * Shared request/schema-agreement timeout config for bootstrap sessions that issue DDL against a real
+ * ScyllaDB container (every IT class in this package that creates a keyspace, table, type, or role
+ * directly). Schema-modifying statements settle through ScyllaDB's Raft-based schema management (group0),
+ * which the driver's 2 second defaults for request and internal schema-refresh/agreement timeouts aren't
+ * reliably enough for.
+ *
+ * <p>Raising the ceiling is not on its own sufficient - a statement can still exceed even a generous timeout
+ * under host contention - so sessions built here execute their DDL through
+ * {@link org.apache.nifi.service.cql.it.CqlDdl}, which retries. That retry used to live here too, in a third
+ * copy of the same loop; it is shared now because all three copies wanted identical behaviour.
  */
 final class ScyllaDdlTimeouts {
 
@@ -43,8 +45,6 @@ final class ScyllaDdlTimeouts {
 
     private static final int DEFAULT_DDL_TIMEOUT_SECONDS = 30;
 
-    private static final int DDL_MAX_ATTEMPTS = 3;
-
     private ScyllaDdlTimeouts() {
     }
 
@@ -56,24 +56,5 @@ final class ScyllaDdlTimeouts {
                 .withDuration(DefaultDriverOption.CONTROL_CONNECTION_TIMEOUT, timeout)
                 .withDuration(DefaultDriverOption.CONTROL_CONNECTION_AGREEMENT_TIMEOUT, timeout)
                 .build();
-    }
-
-    /**
-     * Executes a schema-modifying statement, retrying on {@link DriverTimeoutException}. A DDL statement can
-     * legitimately succeed server-side after the client already gave up waiting for schema agreement, so
-     * every statement passed here must be idempotent ("if not exists") - otherwise a retry after a
-     * false-negative timeout would fail with "already exists" instead of masking the flake.
-     */
-    static void executeDdlWithRetry(final CqlSession session, final String cql) {
-        DriverTimeoutException lastFailure = null;
-        for (int attempt = 1; attempt <= DDL_MAX_ATTEMPTS; attempt++) {
-            try {
-                session.execute(cql);
-                return;
-            } catch (final DriverTimeoutException e) {
-                lastFailure = e;
-            }
-        }
-        throw lastFailure;
     }
 }

@@ -38,13 +38,17 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
+import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.MethodSource;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mockito;
+import org.mockito.stubbing.Stubber;
 
 import java.time.Duration;
 import java.util.List;
 import java.util.Map;
+import java.util.stream.Stream;
 
 import static org.apache.nifi.processors.cql.constants.StatementType.UPDATE_TYPE;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -59,6 +63,7 @@ import static org.mockito.Mockito.eq;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
+import static org.junit.jupiter.params.provider.Arguments.arguments;
 
 public class PutCQLRecordTest {
     // The batch type the processor resolves when Batch Statement Type is left alone. Most tests below are
@@ -259,23 +264,54 @@ public class PutCQLRecordTest {
         runner.assertAllFlowFilesTransferred(PutCQLRecord.REL_FAILURE, 1);
     }
 
-    @Test
-    @DisplayName("A record that fails to insert routes the FlowFile to the failure relationship")
-    void testErrorHandler() {
-        final int recordCount = 1;
+    /**
+     * The three ways an insert can fail partway through a FlowFile's batches, each of which must route to
+     * failure and report how many records had already been written.
+     *
+     * <p>{@code batchesBeforeFailure} of zero is the "fails immediately" case, where nothing was written;
+     * one means the first batch landed before the second threw. The exception type is the axis that matters:
+     * {@link ProcessException} takes the generic error path and {@link IllegalArgumentException} the
+     * configuration-error path (which is how a bad primary key override surfaces), and both have to record
+     * progress the same way.
+     */
+    static Stream<Arguments> insertFailures() {
+        return Stream.of(
+                arguments("fails on the first batch", new ProcessException("Test"), 0, "0"),
+                arguments("fails after one batch", new ProcessException("Test"), 1, "100"),
+                arguments("fails after one batch with a configuration error",
+                        new IllegalArgumentException("/missing evaluated to no values."), 1, "100"));
+    }
 
+    @ParameterizedTest(name = "{0}")
+    @MethodSource("insertFailures")
+    @DisplayName("An insert failure routes the FlowFile to failure, reporting the records written before it")
+    void testInsertFailureRoutesToFailureRecordingProgress(final String description, final RuntimeException failure,
+                                                           final int batchesBeforeFailure, final String expectedRecordsWritten) {
         runner.setProperty(PutCQLRecord.BATCH_SIZE, "100");
 
-        for (int i = 0; i < recordCount; i++) {
+        for (int i = 0; i < 250; i++) {
             mockReader.addRecord("Hello, world", "test_user");
         }
 
-        doThrow(new ProcessException("Test"))
+        Stubber stubber = null;
+        for (int batch = 0; batch < batchesBeforeFailure; batch++) {
+            stubber = stubber == null ? doNothing() : stubber.doNothing();
+        }
+        (stubber == null ? doThrow(failure) : stubber.doThrow(failure))
                 .when(service)
                 .insert(any(QualifiedTableName.class), anyList(), anyMap(), any(CqlBatchType.class), any(WriteOverrides.class));
+
         runner.enqueue("");
         runner.run();
+
         runner.assertAllFlowFilesTransferred(PutCQLRecord.REL_FAILURE, 1);
+
+        final MockFlowFile failedFlowFile = runner.getFlowFilesForRelationship(PutCQLRecord.REL_FAILURE).get(0);
+        assertEquals(expectedRecordsWritten, failedFlowFile.getAttribute(PutCQLRecord.RECORDS_WRITTEN_ATTRIBUTE));
+
+        // The batches that did land each left a provenance event behind; the one that threw did not, and the
+        // batches after it were never attempted.
+        assertEquals(batchesBeforeFailure, runner.getProvenanceEvents().size());
     }
 
     @Test
@@ -333,57 +369,6 @@ public class PutCQLRecordTest {
         assertTrue(events.get(0).getDetails().contains("100 total"));
         assertTrue(events.get(1).getDetails().contains("200 total"));
         assertTrue(events.get(2).getDetails().contains("250 total"));
-    }
-
-    @Test
-    @DisplayName("A failure partway through writing batches leaves a provenance trail and an attribute for what was already written")
-    void testPartialBatchFailureRecordsProgress() {
-        runner.setProperty(PutCQLRecord.BATCH_SIZE, "100");
-
-        for (int i = 0; i < 250; i++) {
-            mockReader.addRecord("Hello, world", "test_user");
-        }
-
-        // First batch succeeds, second batch fails; the third batch is never reached.
-        doNothing().doThrow(new ProcessException("Test"))
-                .when(service)
-                .insert(any(QualifiedTableName.class), anyList(), anyMap(), any(CqlBatchType.class), any(WriteOverrides.class));
-
-        runner.enqueue("");
-        runner.run();
-
-        runner.assertAllFlowFilesTransferred(PutCQLRecord.REL_FAILURE, 1);
-
-        MockFlowFile failedFlowFile = runner.getFlowFilesForRelationship(PutCQLRecord.REL_FAILURE).get(0);
-        assertEquals("100", failedFlowFile.getAttribute(PutCQLRecord.RECORDS_WRITTEN_ATTRIBUTE));
-
-        List<ProvenanceEventRecord> events = runner.getProvenanceEvents();
-        assertEquals(1, events.size());
-        assertTrue(events.get(0).getDetails().contains("100 total"));
-    }
-
-    @Test
-    @DisplayName("A configuration/data error partway through writing batches still reports what was already written")
-    void testMidStreamIllegalArgumentReportsProgress() {
-        runner.setProperty(PutCQLRecord.BATCH_SIZE, "100");
-
-        for (int i = 0; i < 250; i++) {
-            mockReader.addRecord("Hello, world", "test_user");
-        }
-
-        // First batch succeeds; the second fails the way a bad primary key override does - an
-        // IllegalArgumentException, taking the configuration-error path rather than the generic one.
-        doNothing().doThrow(new IllegalArgumentException("/missing evaluated to no values."))
-                .when(service)
-                .insert(any(QualifiedTableName.class), anyList(), anyMap(), any(CqlBatchType.class), any(WriteOverrides.class));
-
-        runner.enqueue("");
-        runner.run();
-
-        runner.assertAllFlowFilesTransferred(PutCQLRecord.REL_FAILURE, 1);
-
-        MockFlowFile failedFlowFile = runner.getFlowFilesForRelationship(PutCQLRecord.REL_FAILURE).get(0);
-        assertEquals("100", failedFlowFile.getAttribute(PutCQLRecord.RECORDS_WRITTEN_ATTRIBUTE));
     }
 
     @Test

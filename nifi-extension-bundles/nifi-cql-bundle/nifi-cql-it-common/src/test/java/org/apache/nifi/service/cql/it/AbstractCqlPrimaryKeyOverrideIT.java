@@ -17,7 +17,6 @@
 package org.apache.nifi.service.cql.it;
 
 import com.datastax.oss.driver.api.core.CqlSession;
-import com.datastax.oss.driver.api.core.DriverTimeoutException;
 import com.datastax.oss.driver.api.core.cql.Row;
 import com.datastax.oss.driver.api.core.uuid.Uuids;
 import org.apache.nifi.record.path.RecordPath;
@@ -32,8 +31,6 @@ import org.apache.nifi.service.cql.api.service.CQLExecutionService;
 import org.apache.nifi.service.cql.api.service.WriteOverrides;
 import org.apache.nifi.service.cql.api.metadata.PrimaryKeyIdentifier;
 import org.apache.nifi.service.cql.api.metadata.QualifiedTableName;
-import org.apache.nifi.util.TestRunner;
-import org.apache.nifi.util.TestRunners;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInstance;
@@ -145,8 +142,6 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 public abstract class AbstractCqlPrimaryKeyOverrideIT {
 
-    private static final int DDL_MAX_ATTEMPTS = 3;
-
     private static final long SEED = 42L;
 
     private static final int CHAT_COUNT = 5;
@@ -181,34 +176,17 @@ public abstract class AbstractCqlPrimaryKeyOverrideIT {
     protected void initializeSessionProvider(final CqlConnectionInfo connectionInfo) throws Exception {
         this.session = connectionInfo.session();
         this.keyspace = connectionInfo.keyspace();
-        this.sessionProvider = newSessionProvider();
         this.recordPathCache = new RecordPathCache(10);
-
-        final TestRunner runner = TestRunners.newTestRunner(new MockCqlProcessor());
-        runner.addControllerService("cql-session-provider", sessionProvider);
-        runner.setProperty(sessionProvider, CQLExecutionService.CONTACT_POINTS, connectionInfo.contactPoint());
-        runner.setProperty(sessionProvider, CQLExecutionService.DATACENTER, connectionInfo.datacenter());
-        runner.setProperty(sessionProvider, CQLExecutionService.KEYSPACE, connectionInfo.keyspace());
-        runner.enableControllerService(sessionProvider);
+        this.sessionProvider = CqlServiceRunner.forService(newSessionProvider())
+                .withConnection(connectionInfo)
+                .enable();
 
         createSchema();
     }
 
-    /**
-     * Retries a schema-modifying statement on {@link DriverTimeoutException}, for the same reason (and in
-     * the same idempotent-DDL-only shape) as the identically-named helper in {@link AbstractCqlRecordFieldTypeIT}.
-     */
+    /** Idempotent DDL, retried on the failures that say nothing about whether it ran - see {@link CqlDdl}. */
     private void executeDdlWithRetry(final String cql) {
-        DriverTimeoutException lastFailure = null;
-        for (int attempt = 1; attempt <= DDL_MAX_ATTEMPTS; attempt++) {
-            try {
-                session.execute(cql);
-                return;
-            } catch (final DriverTimeoutException e) {
-                lastFailure = e;
-            }
-        }
-        throw lastFailure;
+        CqlDdl.executeWithRetry(session, cql);
     }
 
     private void createSchema() {

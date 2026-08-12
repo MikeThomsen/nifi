@@ -22,6 +22,7 @@ import com.datastax.oss.driver.api.core.config.DriverConfigLoader;
 import org.apache.nifi.service.cql.api.service.CQLExecutionService;
 import org.apache.nifi.service.cql.it.AbstractCqlPrimaryKeyOverrideIT;
 import org.apache.nifi.service.cql.it.CqlConnectionInfo;
+import org.apache.nifi.service.cql.it.CqlDdl;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.TestInstance;
@@ -63,7 +64,7 @@ class ScyllaPrimaryKeyOverrideIT extends AbstractCqlPrimaryKeyOverrideIT {
                 .withLocalDatacenter(LOCAL_DATACENTER)
                 .withConfigLoader(longTimeoutConfig)
                 .build();
-        ScyllaDdlTimeouts.executeDdlWithRetry(session,
+        CqlDdl.executeWithRetry(session,
                 "create keyspace if not exists " + KEYSPACE + " with replication = { 'class': 'NetworkTopologyStrategy', '" + LOCAL_DATACENTER + "': 1};");
 
         final String contactPoint = container.getContainerIpAddress() + ":" + container.getMappedPort(9042);

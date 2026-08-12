@@ -21,7 +21,6 @@ import org.apache.nifi.security.cert.builder.StandardCertificateBuilder;
 import org.apache.nifi.service.cql.api.service.CQLExecutionService;
 import org.apache.nifi.ssl.StandardSSLContextService;
 import org.apache.nifi.util.TestRunner;
-import org.apache.nifi.util.TestRunners;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInstance;
@@ -38,7 +37,6 @@ import java.security.PrivateKey;
 import java.security.SecureRandom;
 import java.security.cert.X509Certificate;
 import java.time.Duration;
-import java.util.Collections;
 import java.util.HexFormat;
 import java.util.List;
 import javax.security.auth.x500.X500Principal;
@@ -70,6 +68,8 @@ public abstract class AbstractCqlSslIT {
     protected static final String LOCAL_DATACENTER = "datacenter1";
 
     protected static final String STORE_TYPE = "PKCS12";
+
+    private static final String SSL_CONTEXT_SERVICE_ID = "ssl-context-service";
 
     private static final Path SSL_ARTIFACT_DIRECTORY = createSslArtifactDirectory();
 
@@ -191,11 +191,14 @@ public abstract class AbstractCqlSslIT {
 
     private void assertSslConnectionOutcome(final String contactPoint, final SslKeyStoreCredentials trustStore, final SslKeyStoreCredentials keyStore,
                                              final ConfigVerificationResult.Outcome expectedOutcome) throws Exception {
-        final StandardSSLContextService sslContextService = new StandardSSLContextService();
-        final CQLExecutionService sessionProvider = newSessionProvider();
-        final TestRunner runner = TestRunners.newTestRunner(new MockCqlProcessor());
+        final CqlServiceRunner serviceRunner = CqlServiceRunner.forService(newSessionProvider())
+                .withConnection(contactPoint, LOCAL_DATACENTER, KEYSPACE);
 
-        runner.addControllerService("ssl-context-service", sslContextService);
+        // The SSL context service is wired against the same runner directly rather than through
+        // CqlServiceRunner: which stores it needs depends on whether this is a one-way or two-way scenario.
+        final TestRunner runner = serviceRunner.runner();
+        final StandardSSLContextService sslContextService = new StandardSSLContextService();
+        runner.addControllerService(SSL_CONTEXT_SERVICE_ID, sslContextService);
         runner.setProperty(sslContextService, StandardSSLContextService.TRUSTSTORE, trustStore.path().toString());
         runner.setProperty(sslContextService, StandardSSLContextService.TRUSTSTORE_PASSWORD, trustStore.password());
         runner.setProperty(sslContextService, StandardSSLContextService.TRUSTSTORE_TYPE, STORE_TYPE);
@@ -206,13 +209,9 @@ public abstract class AbstractCqlSslIT {
         }
         runner.enableControllerService(sslContextService);
 
-        runner.addControllerService("cql-session-provider", sessionProvider);
-        runner.setProperty(sessionProvider, CQLExecutionService.CONTACT_POINTS, contactPoint);
-        runner.setProperty(sessionProvider, CQLExecutionService.DATACENTER, LOCAL_DATACENTER);
-        runner.setProperty(sessionProvider, CQLExecutionService.KEYSPACE, KEYSPACE);
-        runner.setProperty(sessionProvider, CQLExecutionService.PROP_SSL_CONTEXT_SERVICE, "ssl-context-service");
-
-        final List<ConfigVerificationResult> results = runner.verify(sessionProvider, Collections.emptyMap());
+        final List<ConfigVerificationResult> results = serviceRunner
+                .withProperty(CQLExecutionService.PROP_SSL_CONTEXT_SERVICE, SSL_CONTEXT_SERVICE_ID)
+                .verify();
 
         assertFalse(results.isEmpty());
         if (expectedOutcome == ConfigVerificationResult.Outcome.SUCCESSFUL) {

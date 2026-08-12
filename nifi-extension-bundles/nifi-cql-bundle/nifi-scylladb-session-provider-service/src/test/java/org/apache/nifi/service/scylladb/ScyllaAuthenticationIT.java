@@ -21,6 +21,7 @@ import com.datastax.oss.driver.api.core.CqlSession;
 import com.datastax.oss.driver.api.core.config.DriverConfigLoader;
 import org.apache.nifi.service.cql.api.service.CQLExecutionService;
 import org.apache.nifi.service.cql.it.AbstractCqlAuthenticationIT;
+import org.apache.nifi.service.cql.it.CqlDdl;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.TestInstance;
@@ -101,9 +102,9 @@ class ScyllaAuthenticationIT extends AbstractCqlAuthenticationIT {
                 .withAuthCredentials(BOOTSTRAP_USERNAME, BOOTSTRAP_PASSWORD)
                 .withConfigLoader(longTimeoutConfig)
                 .build()) {
-            ScyllaDdlTimeouts.executeDdlWithRetry(bootstrapSession, String.format(
+            CqlDdl.executeWithRetry(bootstrapSession, String.format(
                     "CREATE ROLE IF NOT EXISTS admin WITH PASSWORD = '%s' AND LOGIN = true AND SUPERUSER = true", realPassword));
-            ScyllaDdlTimeouts.executeDdlWithRetry(bootstrapSession, "create keyspace if not exists " + KEYSPACE
+            CqlDdl.executeWithRetry(bootstrapSession, "create keyspace if not exists " + KEYSPACE
                     + " with replication = { 'class': 'NetworkTopologyStrategy', '" + LOCAL_DATACENTER + "': 1};");
         }
 

@@ -21,6 +21,7 @@ import com.datastax.oss.driver.api.core.CqlSession;
 import org.apache.nifi.service.cql.api.service.CQLExecutionService;
 import org.apache.nifi.service.cql.it.AbstractCqlCrudIT;
 import org.apache.nifi.service.cql.it.CqlConnectionInfo;
+import org.apache.nifi.service.cql.it.CqlDdl;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.TestInstance;
@@ -61,9 +62,9 @@ class ScyllaCrudIT extends AbstractCqlCrudIT {
                 .withConfigLoader(ScyllaDdlTimeouts.longSchemaTimeoutConfigLoader())
                 .build();
 
-        ScyllaDdlTimeouts.executeDdlWithRetry(session,
+        CqlDdl.executeWithRetry(session,
                 "create keyspace if not exists " + KEYSPACE + " with replication = { 'class': 'NetworkTopologyStrategy', '" + LOCAL_DATACENTER + "': 1};");
-        ScyllaDdlTimeouts.executeDdlWithRetry(session, """
+        CqlDdl.executeWithRetry(session, """
                 create table if not exists testspace.message
                 (
                     sender    text,
@@ -73,7 +74,7 @@ class ScyllaCrudIT extends AbstractCqlCrudIT {
                     primary key ( sender, receiver, when_sent )
                 );
                 """);
-        ScyllaDdlTimeouts.executeDdlWithRetry(session, """
+        CqlDdl.executeWithRetry(session, """
                 create table if not exists testspace.query_test
                 (
                     column_a text,
@@ -82,7 +83,7 @@ class ScyllaCrudIT extends AbstractCqlCrudIT {
                     primary key ( (column_a), column_b)
                 );
                 """);
-        ScyllaDdlTimeouts.executeDdlWithRetry(session, """
+        CqlDdl.executeWithRetry(session, """
                 create table if not exists testspace.counter_test
                 (
                     column_a        text,
@@ -90,7 +91,7 @@ class ScyllaCrudIT extends AbstractCqlCrudIT {
                     primary key ( column_a )
                 );
                 """);
-        ScyllaDdlTimeouts.executeDdlWithRetry(session, """
+        CqlDdl.executeWithRetry(session, """
                 create table if not exists testspace.simple_set_test
                 (
                     username text,

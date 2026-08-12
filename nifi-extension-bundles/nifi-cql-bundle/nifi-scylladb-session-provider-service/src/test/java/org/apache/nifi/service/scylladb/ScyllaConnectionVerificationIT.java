@@ -21,6 +21,7 @@ import com.datastax.oss.driver.api.core.CqlSession;
 import org.apache.nifi.service.cql.api.service.CQLExecutionService;
 import org.apache.nifi.service.cql.it.AbstractCqlConnectionVerificationIT;
 import org.apache.nifi.service.cql.it.CqlConnectionInfo;
+import org.apache.nifi.service.cql.it.CqlDdl;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.TestInstance;
@@ -59,7 +60,7 @@ class ScyllaConnectionVerificationIT extends AbstractCqlConnectionVerificationIT
                 .withConfigLoader(ScyllaDdlTimeouts.longSchemaTimeoutConfigLoader())
                 .build();
 
-        ScyllaDdlTimeouts.executeDdlWithRetry(session,
+        CqlDdl.executeWithRetry(session,
                 "create keyspace if not exists " + KEYSPACE + " with replication = { 'class': 'NetworkTopologyStrategy', '" + LOCAL_DATACENTER + "': 1};");
 
         initializeConnectionInfo(new CqlConnectionInfo(contactPoint, LOCAL_DATACENTER, KEYSPACE, session));

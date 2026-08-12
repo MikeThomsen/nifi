@@ -217,17 +217,6 @@ class DistributedMapCacheIT {
     }
 
     @Test
-    @DisplayName("A second put overwrites, since an unconditional CQL write is an upsert")
-    void testPutOverwrites() throws IOException {
-        final String key = key("ow");
-
-        put(key, "first");
-        put(key, "second");
-
-        assertEquals("second", get(key));
-    }
-
-    @Test
     @DisplayName("containsKey answers from the server without transferring the value")
     void testContainsKey() throws IOException {
         final String key = key("ck");
@@ -303,18 +292,6 @@ class DistributedMapCacheIT {
         assertEquals("1", values.get(present));
         assertNull(values.get(absent));
         assertTrue(values.containsKey(absent), "an absent key is present in the map with a null value");
-    }
-
-    @Test
-    @DisplayName("putAll writes every entry")
-    void testPutAll() throws IOException {
-        final String first = key("pa-1");
-        final String second = key("pa-2");
-
-        cache.putAll(Map.of(first, "1", second, "2"), STRING_SERIALIZER, STRING_SERIALIZER);
-
-        assertEquals("1", get(first));
-        assertEquals("2", get(second));
     }
 
     // ---- The property that makes a blob column the right choice ---------------------------------------

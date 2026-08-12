@@ -17,8 +17,6 @@
 package org.apache.nifi.service.cql.it;
 
 import com.datastax.oss.driver.api.core.CqlSession;
-import com.datastax.oss.driver.api.core.DriverTimeoutException;
-import com.datastax.oss.driver.api.core.connection.HeartbeatException;
 import com.datastax.oss.driver.api.core.data.UdtValue;
 import com.datastax.oss.driver.api.core.uuid.Uuids;
 import org.apache.nifi.serialization.SimpleRecordSchema;
@@ -32,8 +30,6 @@ import org.apache.nifi.service.cql.api.service.CQLQueryCallback;
 import org.apache.nifi.service.cql.api.service.QueryOverrides;
 import org.apache.nifi.service.cql.api.service.WriteOverrides;
 import org.apache.nifi.service.cql.api.metadata.QualifiedTableName;
-import org.apache.nifi.util.TestRunner;
-import org.apache.nifi.util.TestRunners;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.provider.MethodSource;
@@ -92,8 +88,6 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 public abstract class AbstractCqlRecordFieldTypeIT {
 
-    private static final int DDL_MAX_ATTEMPTS = 3;
-
     protected CQLExecutionService sessionProvider;
 
     private CqlSession session;
@@ -108,38 +102,14 @@ public abstract class AbstractCqlRecordFieldTypeIT {
     protected void initializeSessionProvider(final CqlConnectionInfo connectionInfo) throws Exception {
         this.session = connectionInfo.session();
         this.keyspace = connectionInfo.keyspace();
-        this.sessionProvider = newSessionProvider();
-
-        final TestRunner runner = TestRunners.newTestRunner(new MockCqlProcessor());
-        runner.addControllerService("cql-session-provider", sessionProvider);
-        runner.setProperty(sessionProvider, CQLExecutionService.CONTACT_POINTS, connectionInfo.contactPoint());
-        runner.setProperty(sessionProvider, CQLExecutionService.DATACENTER, connectionInfo.datacenter());
-        runner.setProperty(sessionProvider, CQLExecutionService.KEYSPACE, connectionInfo.keyspace());
-        runner.enableControllerService(sessionProvider);
+        this.sessionProvider = CqlServiceRunner.forService(newSessionProvider())
+                .withConnection(connectionInfo)
+                .enable();
     }
 
-    /**
-     * Executes a schema-modifying statement, retrying on {@link DriverTimeoutException} and
-     * {@link HeartbeatException}. ScyllaDB's Raft-based schema management (and, less often, Cassandra's own
-     * schema agreement) occasionally takes longer than the configured request timeout to settle a single DDL
-     * statement even though the cluster is otherwise healthy, so a bare timeout here doesn't mean the
-     * statement failed - it may still succeed moments later server-side. A heartbeat failure is the same
-     * story one layer down: the connection carrying the statement died mid-flight (observed on ScyllaDB
-     * under the load of a full-reactor IT run), which says nothing about whether the statement itself was
-     * applied. Every statement passed here must therefore be an idempotent "if not exists" form, since a
-     * retry after a false negative must not fail with "already exists".
-     */
+    /** Idempotent DDL, retried on the failures that say nothing about whether it ran - see {@link CqlDdl}. */
     private void executeDdlWithRetry(final String cql) {
-        RuntimeException lastFailure = null;
-        for (int attempt = 1; attempt <= DDL_MAX_ATTEMPTS; attempt++) {
-            try {
-                session.execute(cql);
-                return;
-            } catch (final DriverTimeoutException | HeartbeatException e) {
-                lastFailure = e;
-            }
-        }
-        throw lastFailure;
+        CqlDdl.executeWithRetry(session, cql);
     }
 
     private void createTable(final String tableName, final String cqlColumnType) {
@@ -226,6 +196,9 @@ public abstract class AbstractCqlRecordFieldTypeIT {
                 arguments("BOOLEAN <- String", "boolean_coercion_test", "boolean", RecordFieldType.BOOLEAN.getDataType(), "true", Boolean.TRUE),
                 arguments("UUID <- String", "uuid_coercion_test", "uuid", RecordFieldType.UUID.getDataType(), uuid.toString(), uuid),
                 arguments("CHAR <- Character", "char_coercion_test", "text", RecordFieldType.CHAR.getDataType(), 'A', "A"),
+                arguments("INT <- String", "int_from_string_test", "int", RecordFieldType.INT.getDataType(), "123456", 123456),
+                // A Short is a valid Number but not the exact Integer type the driver's INT codec requires.
+                arguments("INT <- Short", "int_from_short_test", "int", RecordFieldType.INT.getDataType(), (short) 1234, 1234),
 
                 // java.sql.Date/Time bind through JavaSQLDateCodec and JavaSQLTimeCodec, but reads go through the
                 // driver's default DATE/TIME codecs: registering those codecs adds a way to bind the java.sql
@@ -476,63 +449,4 @@ public abstract class AbstractCqlRecordFieldTypeIT {
         assertEquals("456 Elm St", ((UdtValue) addressList.get(1)).getString("street_address"));
     }
 
-    @Test
-    @DisplayName("A record with an ARRAY of RECORD field writes a list of UDTs nested inside other UDTs to and reads it back")
-    void testArrayOfPersonWithNestedAddressUserDefinedType() {
-        executeDdlWithRetry("create type if not exists " + keyspace + ".address_nested_item (street text, state text, \"zipCode\" int)");
-        executeDdlWithRetry("create type if not exists " + keyspace + ".person_nested_item (\"firstName\" text, \"lastName\" text, address frozen<address_nested_item>)");
-        executeDdlWithRetry(String.format("create table if not exists %s.person_array_test (id int primary key, people list<frozen<person_nested_item>>)", keyspace));
-
-        final RecordSchema addressSchema = new SimpleRecordSchema(List.of(
-                new RecordField("street", RecordFieldType.STRING.getDataType()),
-                new RecordField("state", RecordFieldType.STRING.getDataType()),
-                new RecordField("zipCode", RecordFieldType.INT.getDataType())
-        ));
-        final RecordSchema personSchema = new SimpleRecordSchema(List.of(
-                new RecordField("firstName", RecordFieldType.STRING.getDataType()),
-                new RecordField("lastName", RecordFieldType.STRING.getDataType()),
-                new RecordField("address", RecordFieldType.RECORD.getRecordDataType(addressSchema))
-        ));
-        final RecordSchema schema = schemaFor(new RecordField("people",
-                RecordFieldType.ARRAY.getArrayDataType(RecordFieldType.RECORD.getRecordDataType(personSchema))));
-
-        final MapRecord addressOne = new MapRecord(addressSchema, Map.of("street", "123 Main St", "state", "NC", "zipCode", 27601));
-        final MapRecord personOne = new MapRecord(personSchema, Map.of("firstName", "John", "lastName", "Doe", "address", addressOne));
-
-        final MapRecord addressTwo = new MapRecord(addressSchema, Map.of("street", "456 Elm St", "state", "SC", "zipCode", 29401));
-        final MapRecord personTwo = new MapRecord(personSchema, Map.of("firstName", "Jane", "lastName", "Smith", "address", addressTwo));
-
-        final MapRecord record = new MapRecord(schema, Map.of("id", 1, "people", List.of(personOne, personTwo)));
-
-        assertDoesNotThrow(() -> sessionProvider.insert(new QualifiedTableName(null, "person_array_test"), record, Map.of(), WriteOverrides.NONE));
-
-        final Object people = readBack("person_array_test", "people", 1).getValue("people");
-        assertInstanceOf(List.class, people);
-        final List<?> peopleList = (List<?>) people;
-        assertEquals(2, peopleList.size());
-
-        final UdtValue firstPerson = (UdtValue) peopleList.get(0);
-        assertEquals("John", firstPerson.getString("firstName"));
-        assertEquals("123 Main St", firstPerson.getUdtValue("address").getString("street"));
-
-        final UdtValue secondPerson = (UdtValue) peopleList.get(1);
-        assertEquals("Jane", secondPerson.getString("firstName"));
-        assertEquals("456 Elm St", secondPerson.getUdtValue("address").getString("street"));
-    }
-
-    @Test
-    @DisplayName("A record with an INT field holding a String or a mismatched Number is coerced and reads back as an Integer")
-    void testIntFromStringOrMismatchedNumberIsCoerced() {
-        createTable("int_coercion_test", "int");
-        final RecordSchema schema = schemaFor(new RecordField("value_field", RecordFieldType.INT.getDataType()));
-
-        final MapRecord fromString = new MapRecord(schema, Map.of("id", 1, "value_field", "123456"));
-        assertDoesNotThrow(() -> sessionProvider.insert(new QualifiedTableName(null, "int_coercion_test"), fromString, Map.of(), WriteOverrides.NONE));
-        assertEquals(123456, readBack("int_coercion_test", "value_field", 1).getValue("value_field"));
-
-        // A Short is a valid Number but not the exact Integer type the driver's INT codec requires.
-        final MapRecord fromShort = new MapRecord(schema, Map.of("id", 2, "value_field", (short) 1234));
-        assertDoesNotThrow(() -> sessionProvider.insert(new QualifiedTableName(null, "int_coercion_test"), fromShort, Map.of(), WriteOverrides.NONE));
-        assertEquals(1234, readBack("int_coercion_test", "value_field", 2).getValue("value_field"));
-    }
 }

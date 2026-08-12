@@ -18,13 +18,10 @@ package org.apache.nifi.service.cql.it;
 
 import org.apache.nifi.components.ConfigVerificationResult;
 import org.apache.nifi.service.cql.api.service.CQLExecutionService;
-import org.apache.nifi.util.TestRunner;
-import org.apache.nifi.util.TestRunners;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInstance;
 
-import java.util.Collections;
 import java.util.List;
 import java.util.UUID;
 
@@ -95,16 +92,10 @@ public abstract class AbstractCqlAuthenticationIT {
     }
 
     private List<ConfigVerificationResult> verifyWithPassword(final String password) throws Exception {
-        final CQLExecutionService sessionProvider = newSessionProvider();
-        final TestRunner runner = TestRunners.newTestRunner(new MockCqlProcessor());
-
-        runner.addControllerService("auth-session-provider", sessionProvider);
-        runner.setProperty(sessionProvider, CQLExecutionService.USERNAME, ADMIN_ROLE);
-        runner.setProperty(sessionProvider, CQLExecutionService.PASSWORD, password);
-        runner.setProperty(sessionProvider, CQLExecutionService.CONTACT_POINTS, contactPoint);
-        runner.setProperty(sessionProvider, CQLExecutionService.DATACENTER, datacenter);
-        runner.setProperty(sessionProvider, CQLExecutionService.KEYSPACE, keyspace);
-
-        return runner.verify(sessionProvider, Collections.emptyMap());
+        return CqlServiceRunner.forService(newSessionProvider())
+                .withConnection(contactPoint, datacenter, keyspace)
+                .withProperty(CQLExecutionService.USERNAME, ADMIN_ROLE)
+                .withProperty(CQLExecutionService.PASSWORD, password)
+                .verify();
     }
 }

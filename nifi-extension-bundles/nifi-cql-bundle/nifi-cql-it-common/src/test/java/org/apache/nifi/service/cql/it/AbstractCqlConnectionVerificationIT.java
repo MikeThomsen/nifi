@@ -18,8 +18,6 @@ package org.apache.nifi.service.cql.it;
 
 import org.apache.nifi.components.ConfigVerificationResult;
 import org.apache.nifi.service.cql.api.service.CQLExecutionService;
-import org.apache.nifi.util.TestRunner;
-import org.apache.nifi.util.TestRunners;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInstance;
@@ -28,7 +26,6 @@ import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.util.Collections;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -62,20 +59,11 @@ public abstract class AbstractCqlConnectionVerificationIT {
     @Test
     @DisplayName("Verifying a fully valid configuration reports success for every verification step")
     void testVerifySucceedsWithValidConfiguration() throws Exception {
-        final CQLExecutionService sessionProvider = newSessionProvider();
-        final TestRunner runner = TestRunners.newTestRunner(new MockCqlProcessor());
+        final List<ConfigVerificationResult> results = CqlServiceRunner.forService(newSessionProvider())
+                .withConnection(connectionInfo)
+                .verify();
 
-        runner.addControllerService("cql-session-provider", sessionProvider);
-        runner.setProperty(sessionProvider, CQLExecutionService.CONTACT_POINTS, connectionInfo.contactPoint());
-        runner.setProperty(sessionProvider, CQLExecutionService.DATACENTER, connectionInfo.datacenter());
-        runner.setProperty(sessionProvider, CQLExecutionService.KEYSPACE, connectionInfo.keyspace());
-
-        final List<ConfigVerificationResult> results = runner.verify(sessionProvider, Collections.emptyMap());
-
-        assertFalse(results.isEmpty());
-        for (final ConfigVerificationResult result : results) {
-            assertEquals(ConfigVerificationResult.Outcome.SUCCESSFUL, result.getOutcome(), result.getExplanation());
-        }
+        assertAllSuccessful(results);
 
         assertTrue(results.stream().anyMatch(result -> "Establish Connection".equals(result.getVerificationStepName())));
         assertTrue(results.stream().anyMatch(result -> "Verify Datacenter".equals(result.getVerificationStepName())));
@@ -85,22 +73,12 @@ public abstract class AbstractCqlConnectionVerificationIT {
     @Test
     @DisplayName("Verifying a configuration with a nonexistent datacenter reports a failed datacenter check")
     void testVerifyFailsWithInvalidDatacenter() throws Exception {
-        final CQLExecutionService sessionProvider = newSessionProvider();
-        final TestRunner runner = TestRunners.newTestRunner(new MockCqlProcessor());
+        final List<ConfigVerificationResult> results = CqlServiceRunner.forService(newSessionProvider())
+                .withConnection(connectionInfo)
+                .withProperty(CQLExecutionService.DATACENTER, "not-a-real-datacenter")
+                .verify();
 
-        runner.addControllerService("cql-session-provider", sessionProvider);
-        runner.setProperty(sessionProvider, CQLExecutionService.CONTACT_POINTS, connectionInfo.contactPoint());
-        runner.setProperty(sessionProvider, CQLExecutionService.DATACENTER, "not-a-real-datacenter");
-        runner.setProperty(sessionProvider, CQLExecutionService.KEYSPACE, connectionInfo.keyspace());
-
-        final List<ConfigVerificationResult> results = runner.verify(sessionProvider, Collections.emptyMap());
-
-        final ConfigVerificationResult connectionResult = results.stream()
-                .filter(result -> "Verify Datacenter".equals(result.getVerificationStepName()))
-                .findFirst()
-                .orElseThrow(() -> new AssertionError("Expected a 'Verify Datacenter' verification result"));
-
-        assertEquals(ConfigVerificationResult.Outcome.FAILED, connectionResult.getOutcome());
+        assertStepFailed(results, "Verify Datacenter");
     }
 
     @Test
@@ -112,21 +90,10 @@ public abstract class AbstractCqlConnectionVerificationIT {
                 }
                 """);
 
-        final CQLExecutionService sessionProvider = newSessionProvider();
-        final TestRunner runner = TestRunners.newTestRunner(new MockCqlProcessor());
-
-        runner.addControllerService("cql-session-provider", sessionProvider);
-        runner.setProperty(sessionProvider, CQLExecutionService.CONTACT_POINTS, connectionInfo.contactPoint());
-        runner.setProperty(sessionProvider, CQLExecutionService.DATACENTER, connectionInfo.datacenter());
-        runner.setProperty(sessionProvider, CQLExecutionService.KEYSPACE, connectionInfo.keyspace());
-        runner.setProperty(sessionProvider, CQLExecutionService.DRIVER_CONFIGURATION_FILE, configFile.toString());
-
-        final List<ConfigVerificationResult> results = runner.verify(sessionProvider, Collections.emptyMap());
-
-        assertFalse(results.isEmpty());
-        for (final ConfigVerificationResult result : results) {
-            assertEquals(ConfigVerificationResult.Outcome.SUCCESSFUL, result.getOutcome(), result.getExplanation());
-        }
+        assertAllSuccessful(CqlServiceRunner.forService(newSessionProvider())
+                .withConnection(connectionInfo)
+                .withProperty(CQLExecutionService.DRIVER_CONFIGURATION_FILE, configFile.toString())
+                .verify());
     }
 
     @Test
@@ -138,23 +105,12 @@ public abstract class AbstractCqlConnectionVerificationIT {
                   basic.request.timeout = 15 seconds
                 """);
 
-        final CQLExecutionService sessionProvider = newSessionProvider();
-        final TestRunner runner = TestRunners.newTestRunner(new MockCqlProcessor());
+        final List<ConfigVerificationResult> results = CqlServiceRunner.forService(newSessionProvider())
+                .withConnection(connectionInfo)
+                .withProperty(CQLExecutionService.DRIVER_CONFIGURATION_FILE, configFile.toString())
+                .verify();
 
-        runner.addControllerService("cql-session-provider", sessionProvider);
-        runner.setProperty(sessionProvider, CQLExecutionService.CONTACT_POINTS, connectionInfo.contactPoint());
-        runner.setProperty(sessionProvider, CQLExecutionService.DATACENTER, connectionInfo.datacenter());
-        runner.setProperty(sessionProvider, CQLExecutionService.KEYSPACE, connectionInfo.keyspace());
-        runner.setProperty(sessionProvider, CQLExecutionService.DRIVER_CONFIGURATION_FILE, configFile.toString());
-
-        final List<ConfigVerificationResult> results = runner.verify(sessionProvider, Collections.emptyMap());
-
-        final ConfigVerificationResult connectionResult = results.stream()
-                .filter(result -> "Establish Connection".equals(result.getVerificationStepName()))
-                .findFirst()
-                .orElseThrow(() -> new AssertionError("Expected an 'Establish Connection' verification result"));
-
-        assertEquals(ConfigVerificationResult.Outcome.FAILED, connectionResult.getOutcome());
+        assertStepFailed(results, "Establish Connection");
     }
 
     @Test
@@ -172,25 +128,33 @@ public abstract class AbstractCqlConnectionVerificationIT {
                 }
                 """, host, wrongPort));
 
-        final CQLExecutionService sessionProvider = newSessionProvider();
-        final TestRunner runner = TestRunners.newTestRunner(new MockCqlProcessor());
+        // Contact Points is deliberately left unset here (hence the individual properties rather than
+        // withConnection): the Java Driver unions the config file's contact points with any supplied
+        // programmatically rather than one overriding the other, so leaving this unset guarantees the only
+        // contact point in play is the wrong one supplied by the file.
+        final List<ConfigVerificationResult> results = CqlServiceRunner.forService(newSessionProvider())
+                .withProperty(CQLExecutionService.DATACENTER, connectionInfo.datacenter())
+                .withProperty(CQLExecutionService.KEYSPACE, connectionInfo.keyspace())
+                .withProperty(CQLExecutionService.DRIVER_CONFIGURATION_FILE, configFile.toString())
+                .verify();
 
-        runner.addControllerService("cql-session-provider", sessionProvider);
-        runner.setProperty(sessionProvider, CQLExecutionService.DATACENTER, connectionInfo.datacenter());
-        runner.setProperty(sessionProvider, CQLExecutionService.KEYSPACE, connectionInfo.keyspace());
-        runner.setProperty(sessionProvider, CQLExecutionService.DRIVER_CONFIGURATION_FILE, configFile.toString());
-        // Contact Points is deliberately left unset here: the Java Driver unions the config file's contact
-        // points with any supplied programmatically rather than one overriding the other, so leaving this
-        // unset guarantees the only contact point in play is the wrong one supplied by the file.
+        assertStepFailed(results, "Establish Connection");
+    }
 
-        final List<ConfigVerificationResult> results = runner.verify(sessionProvider, Collections.emptyMap());
+    private static void assertAllSuccessful(final List<ConfigVerificationResult> results) {
+        assertFalse(results.isEmpty());
+        for (final ConfigVerificationResult result : results) {
+            assertEquals(ConfigVerificationResult.Outcome.SUCCESSFUL, result.getOutcome(), result.getExplanation());
+        }
+    }
 
-        final ConfigVerificationResult connectionResult = results.stream()
-                .filter(result -> "Establish Connection".equals(result.getVerificationStepName()))
+    private static void assertStepFailed(final List<ConfigVerificationResult> results, final String stepName) {
+        final ConfigVerificationResult stepResult = results.stream()
+                .filter(result -> stepName.equals(result.getVerificationStepName()))
                 .findFirst()
-                .orElseThrow(() -> new AssertionError("Expected an 'Establish Connection' verification result"));
+                .orElseThrow(() -> new AssertionError("Expected a '" + stepName + "' verification result"));
 
-        assertEquals(ConfigVerificationResult.Outcome.FAILED, connectionResult.getOutcome());
+        assertEquals(ConfigVerificationResult.Outcome.FAILED, stepResult.getOutcome());
     }
 
     private static Path writeDriverConfigFile(final String content) throws IOException {
